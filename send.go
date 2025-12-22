@@ -341,6 +341,15 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 					return
 				}
 				cli.Log.Warnf("No LID found for %s from server after usync, falling back to PN send (lid_migration_ts=%d)", to, cli.Store.LIDMigrationTimestamp)
+				// 尝试再获取一次对端设备，如果依然为空则直接报错，避免只对自己加密导致仅 sender 回执。
+				devices, devErr := cli.GetUserDevices(ctx, []types.JID{to})
+				if devErr != nil {
+					err = fmt.Errorf("failed to get devices for %s during PN fallback: %w", to, devErr)
+					return
+				} else if len(devices) == 0 {
+					err = fmt.Errorf("no devices found for %s from server", to)
+					return
+				}
 				// Fallback enabled: keep sending to PN without LID rewrite.
 				goto skipLIDRewrite
 			}
