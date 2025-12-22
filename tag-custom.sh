@@ -63,7 +63,8 @@ echo "[tag-custom] 当前提交：$LOCAL_HASH"
 git tag -a "$TAG_NAME" -m "tag on custom: $TAG_NAME"
 git push origin "$TAG_NAME"
 
-cat <<EOF
+# 提示文案仅供参考，这里禁用变量展开，避免 set -u 因隐藏字符触发 TAG_NAME 未绑定报错
+cat <<'EOF'
 [tag-custom] 已在分支 $TARGET_BRANCH 打 tag：$TAG_NAME，并推送到 origin。
 
 下游项目可在 go.mod 中使用类似配置：
