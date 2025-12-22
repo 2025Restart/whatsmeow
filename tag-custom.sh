@@ -46,8 +46,11 @@ fi
 if [[ $# -ge 1 ]]; then
   TAG_NAME="$1"
 else
-  SHORT_SHA="$(git rev-parse --short HEAD)"
-  TAG_NAME="custom-$(date +%Y%m%d-%H%M%S)-${SHORT_SHA}"
+  # 生成符合 Go module 规范的伪版本号 tag：
+  # v0.0.0-YYYYMMDDHHMMSS-<12位提交哈希>
+  SHORT_SHA="$(git rev-parse --short=12 HEAD)"
+  UTC_TS="$(date -u +%Y%m%d%H%M%S)"
+  TAG_NAME="v0.0.0-${UTC_TS}-${SHORT_SHA}"
 fi
 
 echo "[tag-custom] 目标 tag 名称：$TAG_NAME"
