@@ -63,6 +63,11 @@ type Client struct {
 	recvLog waLog.Logger
 	sendLog waLog.Logger
 
+	// EnablePNFallbackOnMissingLID controls whether SendMessage will fall back to PN send
+	// when no LID is found for a PN even after querying the server.
+	// Default is false, which keeps the original behavior.
+	EnablePNFallbackOnMissingLID bool
+
 	socket     *socket.NoiseSocket
 	socketLock sync.RWMutex
 	socketWait chan struct{}

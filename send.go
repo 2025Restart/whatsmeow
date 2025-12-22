@@ -336,8 +336,13 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 				err = fmt.Errorf("failed to get user info for %s to fill LID cache: %w", to, err)
 				return
 			} else if toLID = info[to].LID; toLID.IsEmpty() {
-				err = fmt.Errorf("no LID found for %s from server", to)
-				return
+				if !cli.EnablePNFallbackOnMissingLID {
+					err = fmt.Errorf("no LID found for %s from server", to)
+					return
+				}
+				cli.Log.Warnf("No LID found for %s from server after usync, falling back to PN send (lid_migration_ts=%d)", to, cli.Store.LIDMigrationTimestamp)
+				// Fallback enabled: keep sending to PN without LID rewrite.
+				goto skipLIDRewrite
 			}
 		}
 		resp.DebugTimings.LIDFetch = time.Since(start)
@@ -345,6 +350,7 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 		to = toLID
 		ownID = cli.getOwnLID()
 	}
+skipLIDRewrite:
 	if req.Meta != nil {
 		extraParams.metaNode = &waBinary.Node{
 			Tag:   "meta",
