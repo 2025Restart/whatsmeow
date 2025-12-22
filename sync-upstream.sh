@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 UPSTREAM_REMOTE="upstream"
 UPSTREAM_URL="https://github.com/tulir/whatsmeow.git"
@@ -49,7 +49,12 @@ if ! git show-ref --verify --quiet "refs/heads/$CLEAN_BRANCH"; then
   exit 1
 fi
 
-CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD || echo '')"
+if [[ -z "$CURRENT_BRANCH" ]]; then
+  echo "[sync-upstream] 错误：无法获取当前分支名称，请检查当前仓库状态。"
+  exit 1
+fi
+
 if [[ "$CURRENT_BRANCH" != "$CLEAN_BRANCH" ]]; then
   echo "[sync-upstream] 当前分支为：$CURRENT_BRANCH，将切换到：$CLEAN_BRANCH"
   git checkout "$CLEAN_BRANCH"
