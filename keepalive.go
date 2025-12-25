@@ -63,11 +63,12 @@ func (cli *Client) keepAliveLoop(ctx, connCtx context.Context) {
 }
 
 func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue bool) {
-	respCh, err := cli.sendIQAsync(ctx, infoQuery{
+	query := infoQuery{
 		Namespace: "w:p",
 		Type:      "get",
 		To:        types.ServerJID,
-	})
+	}
+	respCh, err := cli.sendIQAsync(ctx, query)
 	if ctx.Err() != nil {
 		return false, false
 	} else if err != nil {
@@ -76,12 +77,14 @@ func (cli *Client) sendKeepAlive(ctx context.Context) (isSuccess, shouldContinue
 	}
 	select {
 	case <-respCh:
-		// All good
+		// All good - receiveResponse will clean up
 		return true, true
 	case <-time.After(KeepAliveResponseDeadline):
 		cli.Log.Warnf("Keepalive timed out")
+		cli.cancelResponseByID(query.ID)
 		return false, true
 	case <-ctx.Done():
+		cli.cancelResponseByID(query.ID)
 		return false, false
 	}
 }

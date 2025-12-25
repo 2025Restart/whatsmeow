@@ -68,6 +68,16 @@ func (cli *Client) cancelResponse(reqID string, ch chan *waBinary.Node) {
 	cli.responseWaitersLock.Unlock()
 }
 
+func (cli *Client) cancelResponseByID(reqID string) {
+	cli.responseWaitersLock.Lock()
+	waiter, ok := cli.responseWaiters[reqID]
+	if ok {
+		close(waiter)
+		delete(cli.responseWaiters, reqID)
+	}
+	cli.responseWaitersLock.Unlock()
+}
+
 func (cli *Client) receiveResponse(ctx context.Context, data *waBinary.Node) bool {
 	id, ok := data.Attrs["id"].(string)
 	if !ok || (data.Tag != "iq" && data.Tag != "ack") {
@@ -176,8 +186,10 @@ func (cli *Client) sendIQ(ctx context.Context, query infoQuery) (*waBinary.Node,
 		}
 		return res, nil
 	case <-ctx.Done():
+		cli.cancelResponseByID(query.ID)
 		return nil, ctx.Err()
 	case <-time.After(query.Timeout):
+		cli.cancelResponseByID(query.ID)
 		return nil, ErrIQTimedOut
 	}
 }
@@ -222,8 +234,10 @@ func (cli *Client) retryFrame(
 	select {
 	case resp = <-respChan:
 	case <-ctx.Done():
+		cli.cancelResponse(id, respChan)
 		return nil, ctx.Err()
 	case <-timeoutChan:
+		cli.cancelResponse(id, respChan)
 		// FIXME this error isn't technically correct (but works for now - the timeout param is only used from sendIQ)
 		return nil, ErrIQTimedOut
 	}
