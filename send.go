@@ -1381,14 +1381,14 @@ func (cli *Client) encryptMessageForDevice(
 	} else {
 		sessionExists, checked := existingSessions[to.SignalAddress().String()]
 		if !checked {
-			var err error
-			sessionExists, err = cli.Store.ContainsSession(ctx, to.SignalAddress())
+			sess, err := cli.Store.LoadSession(ctx, to.SignalAddress())
 			if err != nil {
 				return nil, false, err
 			}
+			sessionExists = sess != nil && sess.SessionState() != nil && sess.SessionState().HasSenderChain()
 		}
 		if !sessionExists {
-			return nil, false, fmt.Errorf("%w with %s", ErrNoSession, to.SignalAddress().String())
+			return nil, false, fmt.Errorf("%w with %s (invalid/empty session)", ErrNoSession, to.SignalAddress().String())
 		}
 	}
 	cipher := session.NewCipher(builder, to.SignalAddress())

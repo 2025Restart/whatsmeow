@@ -86,7 +86,6 @@ func (device *Device) WithCachedSessions(ctx context.Context, addresses []string
 		if rawSess == nil {
 			sessionRecord = record.NewSession(SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
 		} else {
-			found = true
 			sessionRecord, err = record.NewSessionFromBytes(rawSess, SignalProtobufSerializer.Session, SignalProtobufSerializer.State)
 			if err != nil {
 				zerolog.Ctx(ctx).Err(err).
@@ -94,6 +93,7 @@ func (device *Device) WithCachedSessions(ctx context.Context, addresses []string
 					Msg("Failed to deserialize session")
 				continue
 			}
+			found = sessionRecord.SessionState() != nil && sessionRecord.SessionState().HasSenderChain()
 		}
 		existingSessions[addr] = found
 		wrapped[addr] = sessionCacheEntry{Record: sessionRecord, Found: found}
