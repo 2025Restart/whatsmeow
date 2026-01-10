@@ -10,6 +10,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
 
@@ -116,6 +117,10 @@ func SetWAVersion(version WAVersionContainer) {
 	}
 	waVersion = version
 	waVersionHash = version.Hash()
+	// 同步更新模板中的 AppVersion，确保后续 Clone 得到的是最新版本
+	if BaseClientPayload.UserAgent != nil {
+		BaseClientPayload.UserAgent.AppVersion = waVersion.ProtoAppVersion()
+	}
 }
 
 var BaseClientPayload = &waWa6.ClientPayload{
@@ -126,7 +131,7 @@ var BaseClientPayload = &waWa6.ClientPayload{
 		Mcc:            proto.String("000"),
 		Mnc:            proto.String("000"),
 		OsVersion:      proto.String("0.1"),
-		Manufacturer:   proto.String(""),
+		Manufacturer:   proto.String("Microsoft"),
 		Device:         proto.String("Desktop"),
 		OsBuildNumber:  proto.String("0.1"),
 
@@ -179,6 +184,43 @@ func SetOSInfo(name string, version [3]uint32) {
 	BaseClientPayload.UserAgent.OsBuildNumber = BaseClientPayload.UserAgent.OsVersion
 }
 
+func (device *Device) getHistorySyncProps() *waCompanionReg.DeviceProps {
+	props := proto.Clone(DeviceProps).(*waCompanionReg.DeviceProps)
+
+	// 如果 DeviceProps.Version 还是默认的 0.1.0，同步为当前的 waVersion
+	// 这解决了用户提到的“底层有 GetLatestVersion 能同步 version”但 Props 未同步的问题
+	if props.Version != nil && props.Version.GetPrimary() == 0 && props.Version.GetSecondary() == 1 {
+		props.Version = &waCompanionReg.DeviceProps_AppVersion{
+			Primary:   proto.Uint32(waVersion[0]),
+			Secondary: proto.Uint32(waVersion[1]),
+			Tertiary:  proto.Uint32(waVersion[2]),
+		}
+	}
+
+	// L4: 客户端属性随机化（基于设备 ID 的幂等随机）
+	var seed int64
+	if device.ID != nil {
+		seed = int64(device.ID.UserInt())
+	} else {
+		seed = int64(device.RegistrationID)
+	}
+	r := rand.New(rand.NewSource(seed))
+
+	// 确保 HistorySyncConfig 存在以避免 nil panic
+	if props.HistorySyncConfig == nil {
+		props.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
+	}
+
+	// 随机微调存储配额 (10GB - 20GB)
+	quota := 10240 + uint32(r.Intn(10240))
+	props.HistorySyncConfig.StorageQuotaMb = proto.Uint32(quota)
+
+	// 随机决定是否支持某些次要特性
+	props.HistorySyncConfig.SupportCallLogHistory = proto.Bool(r.Intn(2) == 0)
+
+	return props
+}
+
 func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 	payload := proto.Clone(BaseClientPayload).(*waWa6.ClientPayload)
 	regID := make([]byte, 4)
@@ -191,7 +233,7 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 		// 注意：如果启用了指纹功能，这个值会被 fingerprint.ApplyFingerprint 覆盖
 		DeviceProps.Os = proto.String(DefaultDevicePropsOs)
 	}
-	deviceProps, _ := proto.Marshal(DeviceProps)
+	deviceProps, _ := proto.Marshal(device.getHistorySyncProps())
 	payload.DevicePairingData = &waWa6.ClientPayload_DevicePairingRegistrationData{
 		ERegid:      regID,
 		EKeytype:    []byte{ecc.DjbType},
@@ -204,7 +246,7 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 	}
 	payload.Passive = proto.Bool(false)
 	payload.Pull = proto.Bool(false)
-	return payload
+	return sanitizeClientPayload(payload)
 }
 
 func (device *Device) getLoginPayload() *waWa6.ClientPayload {
@@ -214,6 +256,23 @@ func (device *Device) getLoginPayload() *waWa6.ClientPayload {
 	payload.Passive = proto.Bool(true)
 	payload.Pull = proto.Bool(true)
 	payload.LidDbMigrated = proto.Bool(true)
+	return sanitizeClientPayload(payload)
+}
+
+// sanitizeClientPayload 最后的特征清理（防火墙）
+func sanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
+	if payload == nil {
+		return nil
+	}
+	// L5: 彻底禁止 whatsmeow 特征泄露
+	if payload.UserAgent != nil {
+		if payload.UserAgent.Manufacturer != nil && *payload.UserAgent.Manufacturer == "whatsmeow" {
+			payload.UserAgent.Manufacturer = proto.String("Microsoft")
+		}
+		if payload.UserAgent.Device != nil && *payload.UserAgent.Device == "whatsmeow" {
+			payload.UserAgent.Device = proto.String("Desktop")
+		}
+	}
 	return payload
 }
 

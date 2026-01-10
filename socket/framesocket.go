@@ -97,10 +97,13 @@ func (fs *FrameSocket) Connect(ctx context.Context) error {
 	fs.cancelCtx, fs.cancel = context.WithCancel(ctx)
 
 	fs.log.Debugf("Dialing %s", fs.URL)
-	conn, resp, err := websocket.Dial(ctx, fs.URL, &websocket.DialOptions{
+	opts := &websocket.DialOptions{
 		HTTPClient: fs.HTTPClient,
 		HTTPHeader: fs.HTTPHeaders,
-	})
+	}
+	// L1: 尝试模拟浏览器握手特征
+	// 如果 HTTPClient 已经包含了特定的 RoundTripper (如 uTLS)，则会自动生效
+	conn, resp, err := websocket.Dial(ctx, fs.URL, opts)
 	if err != nil {
 		if resp != nil {
 			err = ErrWithStatusCode{err, resp.StatusCode}

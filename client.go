@@ -31,6 +31,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/proto/waWeb"
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -39,6 +40,7 @@ import (
 	"go.mau.fi/whatsmeow/util/fingerprint"
 	"go.mau.fi/whatsmeow/util/keys"
 	waLog "go.mau.fi/whatsmeow/util/log"
+	"go.mau.fi/whatsmeow/util/tlsutil"
 )
 
 // EventHandler is a function that can handle events from WhatsApp.
@@ -344,6 +346,36 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 	}
 }
 
+func (cli *Client) ensureTLSConfig(ctx context.Context) {
+	// 1. 检查是否启用了指纹功能
+	container, ok := cli.Store.Container.(*sqlstore.Container)
+	if !ok || !container.FingerprintRegion.IsValid() {
+		return
+	}
+
+	var platformType waCompanionReg.DeviceProps_PlatformType
+	jid := cli.Store.GetJID()
+	if jid.IsEmpty() {
+		// 登录前/注册时：使用默认 Chrome 指纹
+		platformType = waCompanionReg.DeviceProps_CHROME
+	} else {
+		// 已有设备：尝试从数据库加载指纹
+		fp, err := container.GetFingerprint(ctx, jid)
+		if err == nil && fp != nil && fp.PlatformType != nil {
+			platformType = *fp.PlatformType
+		} else {
+			platformType = waCompanionReg.DeviceProps_CHROME
+		}
+	}
+
+	// 2. 应用 TLS 指纹
+	helloID := tlsutil.GetClientHelloID(platformType)
+	roundTripper := tlsutil.NewUTLSRoundTripper(helloID, nil)
+	cli.websocketHTTP.Transport = roundTripper
+	cli.preLoginHTTP.Transport = roundTripper
+	cli.Log.Debugf("已应用 TLS 指纹 (JA3): %s (平台: %s)", helloID.Str(), platformType.String())
+}
+
 // SetProxyAddress is a helper method that parses a URL string and calls SetProxy or SetSOCKSProxy based on the URL scheme.
 //
 // Returns an error if url.Parse fails to parse the given address.
@@ -565,6 +597,7 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 	}
 
 	cli.resetExpectedDisconnect()
+	cli.ensureTLSConfig(ctx)
 	client := cli.websocketHTTP
 	if cli.Store.ID == nil {
 		client = cli.preLoginHTTP
@@ -838,6 +871,9 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte) {
 		cli.Log.Warnf("Failed to decode node in frame: %v", err)
 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(decompressed))
 		return
+	}
+	if cli.Log != nil {
+		cli.Log.Debugf("收到服务器节点: %s", node.XMLString())
 	}
 	cli.recvLog.Debugf("%s", node.XMLString())
 	if node.Tag == "xmlstreamend" {

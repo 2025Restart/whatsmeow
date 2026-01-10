@@ -42,6 +42,16 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 					// 默认使用 CHROME 以显示图标
 					existingProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 				}
+				// PC 浏览器特征：强制清理可能导致风控的移动端残留字段
+				if payload.UserAgent != nil && (payload.WebInfo != nil || existingProps.GetPlatformType() == waCompanionReg.DeviceProps_CHROME) {
+					// 官方 Web 通常不发送具体的 MCC/MNC，设为 000
+					payload.UserAgent.Mcc = proto.String("000")
+					payload.UserAgent.Mnc = proto.String("000")
+					// L2: 强制对齐平台类型
+					payload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
+					// 强制设置桌面类型
+					payload.UserAgent.Device = proto.String("Desktop")
+				}
 				devicePropsBytes, _ := proto.Marshal(&existingProps)
 				payload.DevicePairingData.DeviceProps = devicePropsBytes
 			}

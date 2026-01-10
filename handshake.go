@@ -99,6 +99,12 @@ func (cli *Client) doHandshake(ctx context.Context, fs *socket.FrameSocket, ephe
 		clientPayload = cli.Store.GetClientPayload()
 	}
 
+	if cli.Log != nil && clientPayload != nil {
+		ua := clientPayload.GetUserAgent()
+		cli.Log.Infof("发送握手 Payload - 平台: %s, 浏览器: %v, OS: %s, OS版本: %s, 语言: %s, MCC: %s",
+			ua.GetPlatform(), clientPayload.GetWebInfo().GetWebSubPlatform(), ua.GetDevice(), ua.GetOsVersion(), ua.GetLocaleLanguageIso6391(), ua.GetMcc())
+	}
+
 	clientFinishPayloadBytes, err := proto.Marshal(clientPayload)
 	if err != nil {
 		return fmt.Errorf("failed to marshal client finish payload: %w", err)

@@ -239,7 +239,7 @@ func buildFingerprint(
 func getDevicePropsOs(platformDist PlatformDistribution) string {
 	// 获取操作系统显示名称
 	osDisplayName := getOSDisplayName(platformDist.OSName)
-	
+
 	switch platformDist.PlatformType {
 	case waCompanionReg.DeviceProps_CHROME,
 		waCompanionReg.DeviceProps_FIREFOX,
