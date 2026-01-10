@@ -29,7 +29,7 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 				if fp != nil && fp.DevicePropsOs != "" {
 					existingProps.Os = proto.String(fp.DevicePropsOs)
 				} else {
-					existingProps.Os = proto.String("Linux") // 默认值
+					existingProps.Os = proto.String(DefaultDevicePropsOs) // 使用统一管理的默认值
 				}
 				devicePropsBytes, _ := proto.Marshal(&existingProps)
 				payload.DevicePairingData.DeviceProps = devicePropsBytes

@@ -103,13 +103,13 @@ func selectLanguageAndCountry(config *RegionConfig) (lang, country string) {
 // selectPlatform 根据权重选择平台
 func selectPlatform(distributions []PlatformDistribution) PlatformDistribution {
 	if len(distributions) == 0 {
-		// 默认平台
+		// 默认平台：Google Chrome（Web 浏览器）
 		return PlatformDistribution{
 			Platform:     waWa6.ClientPayload_UserAgent_WEB,
-			PlatformType: waCompanionReg.DeviceProps_DESKTOP,
+			PlatformType: waCompanionReg.DeviceProps_CHROME,
 			DeviceType:   waWa6.ClientPayload_UserAgent_DESKTOP,
-			OSName:       "Linux",
-			OSVersions:   []string{"5.15.0"},
+			OSName:       "Windows",
+			OSVersions:   []string{"10", "11"},
 		}
 	}
 
@@ -209,6 +209,9 @@ func buildFingerprint(
 	lang, country string,
 	platformDist PlatformDistribution,
 ) *store.DeviceFingerprint {
+	// 对于 Web 平台，使用浏览器名称；对于其他平台，使用操作系统名称
+	devicePropsOs := getDevicePropsOs(platformDist)
+
 	return &store.DeviceFingerprint{
 		Manufacturer:       manufacturer,
 		Device:             device,
@@ -223,9 +226,64 @@ func buildFingerprint(
 		AppVersion:         store.GetWAVersion().ProtoAppVersion(), // 使用底层 API 获取最新版本
 		DeviceType:         &platformDist.DeviceType,
 		DeviceBoard:        board,
-		DevicePropsOs:      platformDist.OSName,
+		DevicePropsOs:      devicePropsOs,
 		DevicePropsVersion: generateDevicePropsVersion(platformDist),
 		PlatformType:       &platformDist.PlatformType,
+	}
+}
+
+// getDevicePropsOs 根据平台类型返回 DeviceProps.Os 的值
+// 对于 Web 浏览器平台，返回 "浏览器名称 (操作系统)" 格式；对于其他平台，返回操作系统名称
+// 默认使用 Google Chrome
+func getDevicePropsOs(platformDist PlatformDistribution) string {
+	switch platformDist.PlatformType {
+	case waCompanionReg.DeviceProps_CHROME:
+		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+	case waCompanionReg.DeviceProps_FIREFOX:
+		return FormatDevicePropsOs("Firefox", platformDist.OSName)
+	case waCompanionReg.DeviceProps_EDGE:
+		return FormatDevicePropsOs("Microsoft Edge", platformDist.OSName)
+	case waCompanionReg.DeviceProps_SAFARI:
+		return FormatDevicePropsOs("Safari", platformDist.OSName)
+	case waCompanionReg.DeviceProps_OPERA:
+		return FormatDevicePropsOs("Opera", platformDist.OSName)
+	case waCompanionReg.DeviceProps_IE:
+		return FormatDevicePropsOs("Internet Explorer", platformDist.OSName)
+	case waCompanionReg.DeviceProps_CATALINA:
+		// CATALINA 是 macOS 平台，使用 Google Chrome 浏览器
+		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+	case waCompanionReg.DeviceProps_DESKTOP:
+		// DESKTOP 类型默认使用 Google Chrome（Web 浏览器）
+		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+	default:
+		// 对于非 Web 平台（Android, iOS 等），使用操作系统名称
+		// 但如果是 Web 平台但未匹配到浏览器类型，也使用 Google Chrome
+		if platformDist.Platform == waWa6.ClientPayload_UserAgent_WEB {
+			return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+		}
+		return platformDist.OSName
+	}
+}
+
+// getOSDisplayName 将操作系统名称转换为显示名称
+func getOSDisplayName(osName string) string {
+	switch osName {
+	case "Windows":
+		return "Windows"
+	case "macOS":
+		return "Mac OS"
+	case "Linux":
+		return "Linux"
+	case "Android":
+		return "Android"
+	case "iOS":
+		return "iOS"
+	default:
+		// 如果未匹配，返回原名称或默认值
+		if osName != "" {
+			return osName
+		}
+		return "Windows" // 默认值
 	}
 }
 

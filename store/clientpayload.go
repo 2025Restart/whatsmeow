@@ -22,6 +22,20 @@ import (
 	"go.mau.fi/whatsmeow/types"
 )
 
+// 设备指纹相关常量（统一管理）
+const (
+	// DefaultBrowserName 默认浏览器名称
+	DefaultBrowserName = "Google Chrome"
+
+	// DefaultOSName 默认操作系统名称（用于显示）
+	DefaultOSName = "Windows"
+
+	// DefaultDevicePropsOs 默认 DeviceProps.Os 值
+	// 格式：浏览器名称 (操作系统名称)
+	// 示例：Google Chrome (Windows), Google Chrome (Mac OS), Google Chrome (Linux)
+	DefaultDevicePropsOs = DefaultBrowserName + " (" + DefaultOSName + ")"
+)
+
 // WAVersionContainer is a container for a WhatsApp web version number.
 type WAVersionContainer [3]uint32
 
@@ -125,7 +139,7 @@ var BaseClientPayload = &waWa6.ClientPayload{
 }
 
 var DeviceProps = &waCompanionReg.DeviceProps{
-	Os: proto.String("Linux"),
+	Os: proto.String(DefaultDevicePropsOs), // 使用统一管理的默认值
 	Version: &waCompanionReg.DeviceProps_AppVersion{
 		Primary:   proto.Uint32(0),
 		Secondary: proto.Uint32(1),
@@ -171,7 +185,9 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 	binary.BigEndian.PutUint32(preKeyID, device.SignedPreKey.KeyID)
 	// 确保 DeviceProps.Os 不是非官方标识（双重保障）
 	if DeviceProps.Os != nil && *DeviceProps.Os == "whatsmeow" {
-		DeviceProps.Os = proto.String("Linux")
+		// 使用统一管理的默认值
+		// 注意：如果启用了指纹功能，这个值会被 fingerprint.ApplyFingerprint 覆盖
+		DeviceProps.Os = proto.String(DefaultDevicePropsOs)
 	}
 	deviceProps, _ := proto.Marshal(DeviceProps)
 	payload.DevicePairingData = &waWa6.ClientPayload_DevicePairingRegistrationData{
