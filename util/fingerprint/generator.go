@@ -135,10 +135,25 @@ func selectDevice(config *RegionConfig, platformDist PlatformDistribution) (manu
 		manufacturers = []string{"Samsung", "Xiaomi", "OnePlus", "Motorola", "Realme"}
 	case waCompanionReg.DeviceProps_IOS_PHONE, waCompanionReg.DeviceProps_IPAD:
 		manufacturers = []string{"Apple"}
+	case waCompanionReg.DeviceProps_CATALINA:
+		// macOS 平台，只选择 Apple 设备
+		manufacturers = []string{"Apple"}
+	case waCompanionReg.DeviceProps_CHROME, waCompanionReg.DeviceProps_FIREFOX, waCompanionReg.DeviceProps_EDGE:
+		// Windows Web 平台，只选择 Windows 设备（排除 Apple）
+		manufacturers = []string{"Microsoft", "Dell", "HP", "Lenovo", "Acer", "ASUS"}
 	case waCompanionReg.DeviceProps_DESKTOP:
-		manufacturers = []string{"Apple", "Microsoft", "Dell", "HP", "Lenovo"}
+		// Linux 平台，选择 Linux 兼容设备（排除 Apple，因为 Mac 很少运行 Linux）
+		manufacturers = []string{"Microsoft", "Dell", "HP", "Lenovo", "Acer", "ASUS"}
 	default:
-		manufacturers = []string{"Samsung", "Apple", "Microsoft"}
+		// 其他平台，根据 OSName 判断
+		if platformDist.OSName == "macOS" {
+			manufacturers = []string{"Apple"}
+		} else if platformDist.OSName == "Windows" {
+			manufacturers = []string{"Microsoft", "Dell", "HP", "Lenovo", "Acer", "ASUS"}
+		} else {
+			// Linux 或其他
+			manufacturers = []string{"Microsoft", "Dell", "HP", "Lenovo", "Acer", "ASUS"}
+		}
 	}
 
 	// 从配置的设备型号池中选择
@@ -195,22 +210,22 @@ func buildFingerprint(
 	platformDist PlatformDistribution,
 ) *store.DeviceFingerprint {
 	return &store.DeviceFingerprint{
-		Manufacturer:    manufacturer,
-		Device:          device,
-		DeviceModelType: modelType,
-		OsVersion:       osVersion,
-		OsBuildNumber:   osBuildNumber,
-		Mcc:             mcc,
-		Mnc:             mnc,
-		LocaleLanguage:  lang,
-		LocaleCountry:   country,
-		Platform:        &platformDist.Platform,
-		AppVersion:      store.GetWAVersion().ProtoAppVersion(), // 使用底层 API 获取最新版本
-		DeviceType:      &platformDist.DeviceType,
-		DeviceBoard:     board,
-		DevicePropsOs:   platformDist.OSName,
+		Manufacturer:       manufacturer,
+		Device:             device,
+		DeviceModelType:    modelType,
+		OsVersion:          osVersion,
+		OsBuildNumber:      osBuildNumber,
+		Mcc:                mcc,
+		Mnc:                mnc,
+		LocaleLanguage:     lang,
+		LocaleCountry:      country,
+		Platform:           &platformDist.Platform,
+		AppVersion:         store.GetWAVersion().ProtoAppVersion(), // 使用底层 API 获取最新版本
+		DeviceType:         &platformDist.DeviceType,
+		DeviceBoard:        board,
+		DevicePropsOs:      platformDist.OSName,
 		DevicePropsVersion: generateDevicePropsVersion(platformDist),
-		PlatformType:    &platformDist.PlatformType,
+		PlatformType:       &platformDist.PlatformType,
 	}
 }
 
@@ -236,7 +251,7 @@ func generateAndroidBuildNumber(osVersions []string) string {
 	if len(osVersions) == 0 {
 		return "TP1A.220624.014"
 	}
-	
+
 	// 根据 OS 版本选择构建号前缀
 	version := osVersions[mathRand.Intn(len(osVersions))]
 	var prefix string
@@ -252,15 +267,15 @@ func generateAndroidBuildNumber(osVersions []string) string {
 	default:
 		prefix = "TP" // 默认 Android 13
 	}
-	
+
 	// 生成日期部分（YYMMDD）
 	year := 22 + mathRand.Intn(3) // 22-24
 	month := 1 + mathRand.Intn(12)
 	day := 1 + mathRand.Intn(28)
-	
+
 	// 生成修订号（3位数字）
 	revision := mathRand.Intn(1000)
-	
+
 	return fmt.Sprintf("%s%d.%02d%02d%02d.%03d", prefix, mathRand.Intn(2)+1, year, month, day, revision)
 }
 
@@ -270,7 +285,7 @@ func generateIOSBuildNumber(osVersions []string) string {
 	if len(osVersions) == 0 {
 		return "20G95"
 	}
-	
+
 	version := osVersions[mathRand.Intn(len(osVersions))]
 	var major int
 	switch version {
@@ -283,11 +298,11 @@ func generateIOSBuildNumber(osVersions []string) string {
 	default:
 		major = 21 // 默认 iOS 16
 	}
-	
+
 	// 生成小版本和修订号
-	minor := mathRand.Intn(10) + 1 // 1-10
+	minor := mathRand.Intn(10) + 1  // 1-10
 	patch := mathRand.Intn(200) + 1 // 1-200
-	
+
 	return fmt.Sprintf("%dG%d", major, minor*10+patch)
 }
 
@@ -301,9 +316,9 @@ func generateDevicePropsVersion(platformDist PlatformDistribution) *waCompanionR
 			Tertiary:  proto.Uint32(2),
 		}
 	}
-	
+
 	osVersion := platformDist.OSVersions[mathRand.Intn(len(platformDist.OSVersions))]
-	
+
 	switch platformDist.PlatformType {
 	case waCompanionReg.DeviceProps_ANDROID_PHONE, waCompanionReg.DeviceProps_ANDROID_TABLET:
 		// Android 版本：11, 12, 13, 14 -> DeviceProps: {11, 0, 0}, {12, 0, 0}, etc.

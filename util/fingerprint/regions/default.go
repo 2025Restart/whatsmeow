@@ -22,16 +22,16 @@ func init() {
 			{Code: "en", Weight: 1.0, Countries: []string{"US", "GB", "CA", "AU", "NZ"}},
 		},
 
-		DeviceDistribution: []fingerprint.PlatformDistribution{
-			{
-				Platform:     waWa6.ClientPayload_UserAgent_MACOS,
-				PlatformType: waCompanionReg.DeviceProps_CATALINA,
-				DeviceType:   waWa6.ClientPayload_UserAgent_DESKTOP,
-				Weight:       1.0,
-				OSName:       "macOS",
-				OSVersions:   []string{"10.15.7", "11.7.10", "12.6.1", "13.5.2", "14.2.1"},
-			},
+	DeviceDistribution: []fingerprint.PlatformDistribution{
+		{
+			Platform:     waWa6.ClientPayload_UserAgent_WEB,
+			PlatformType: waCompanionReg.DeviceProps_CHROME,
+			DeviceType:   waWa6.ClientPayload_UserAgent_DESKTOP,
+			Weight:       1.0, // 100% Windows Web
+			OSName:       "Windows",
+			OSVersions:   []string{"10", "11"},
 		},
+	},
 
 		MobileNetworks: []fingerprint.MobileNetworkConfig{
 			{MCC: "310", MNC: "260", OperatorName: "T-Mobile", Weight: 1.0},
