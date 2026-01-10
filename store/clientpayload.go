@@ -31,9 +31,11 @@ const (
 	DefaultOSName = "Windows"
 
 	// DefaultDevicePropsOs 默认 DeviceProps.Os 值
-	// 格式：浏览器名称 (操作系统名称)
-	// 示例：Google Chrome (Windows), Google Chrome (Mac OS), Google Chrome (Linux)
-	DefaultDevicePropsOs = DefaultBrowserName + " (" + DefaultOSName + ")"
+	// 注意：当 PlatformType 是浏览器类型时，WhatsApp 会自动添加浏览器名称前缀
+	// 因此 Os 字段应该只包含操作系统名称，避免重复显示
+	// 格式：操作系统名称
+	// 示例：Windows, Mac OS, Linux
+	DefaultDevicePropsOs = DefaultOSName
 )
 
 // WAVersionContainer is a container for a WhatsApp web version number.

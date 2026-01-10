@@ -233,33 +233,29 @@ func buildFingerprint(
 }
 
 // getDevicePropsOs 根据平台类型返回 DeviceProps.Os 的值
-// 对于 Web 浏览器平台，返回 "浏览器名称 (操作系统)" 格式；对于其他平台，返回操作系统名称
-// 默认使用 Google Chrome
+// 注意：当 PlatformType 是浏览器类型（CHROME, FIREFOX 等）时，WhatsApp 会自动添加浏览器名称前缀
+// 因此 Os 字段应该只包含操作系统名称，避免重复显示
+// 对于非浏览器平台，返回操作系统名称
 func getDevicePropsOs(platformDist PlatformDistribution) string {
+	// 获取操作系统显示名称
+	osDisplayName := getOSDisplayName(platformDist.OSName)
+	
 	switch platformDist.PlatformType {
-	case waCompanionReg.DeviceProps_CHROME:
-		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
-	case waCompanionReg.DeviceProps_FIREFOX:
-		return FormatDevicePropsOs("Firefox", platformDist.OSName)
-	case waCompanionReg.DeviceProps_EDGE:
-		return FormatDevicePropsOs("Microsoft Edge", platformDist.OSName)
-	case waCompanionReg.DeviceProps_SAFARI:
-		return FormatDevicePropsOs("Safari", platformDist.OSName)
-	case waCompanionReg.DeviceProps_OPERA:
-		return FormatDevicePropsOs("Opera", platformDist.OSName)
-	case waCompanionReg.DeviceProps_IE:
-		return FormatDevicePropsOs("Internet Explorer", platformDist.OSName)
-	case waCompanionReg.DeviceProps_CATALINA:
-		// CATALINA 是 macOS 平台，使用 Google Chrome 浏览器
-		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
-	case waCompanionReg.DeviceProps_DESKTOP:
-		// DESKTOP 类型默认使用 Google Chrome（Web 浏览器）
-		return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+	case waCompanionReg.DeviceProps_CHROME,
+		waCompanionReg.DeviceProps_FIREFOX,
+		waCompanionReg.DeviceProps_EDGE,
+		waCompanionReg.DeviceProps_SAFARI,
+		waCompanionReg.DeviceProps_OPERA,
+		waCompanionReg.DeviceProps_IE,
+		waCompanionReg.DeviceProps_CATALINA,
+		waCompanionReg.DeviceProps_DESKTOP:
+		// 浏览器平台：只返回操作系统名称，WhatsApp 会根据 PlatformType 自动添加浏览器名称
+		return osDisplayName
 	default:
 		// 对于非 Web 平台（Android, iOS 等），使用操作系统名称
-		// 但如果是 Web 平台但未匹配到浏览器类型，也使用 Google Chrome
+		// 但如果是 Web 平台但未匹配到浏览器类型，也返回操作系统名称
 		if platformDist.Platform == waWa6.ClientPayload_UserAgent_WEB {
-			return FormatDevicePropsOs(DefaultBrowserName, platformDist.OSName)
+			return osDisplayName
 		}
 		return platformDist.OSName
 	}

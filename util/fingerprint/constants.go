@@ -21,19 +21,21 @@ var (
 )
 
 // GetDefaultDevicePropsOs 获取默认 DeviceProps.Os 值
-// 格式：浏览器名称 (操作系统名称)
+// 注意：当 PlatformType 是浏览器类型时，WhatsApp 会自动添加浏览器名称前缀
+// 因此 Os 字段应该只包含操作系统名称
+// 格式：操作系统名称
 func GetDefaultDevicePropsOs() string {
 	return store.DefaultDevicePropsOs
 }
 
-// FormatDevicePropsOs 格式化 DeviceProps.Os
-// browserName: 浏览器名称，如 "Google Chrome", "Firefox"
-// osName: 操作系统名称，如 "Windows", "macOS", "Linux"
-// 返回格式：浏览器名称 (操作系统显示名称)
-// 示例：FormatDevicePropsOs("Google Chrome", "macOS") -> "Google Chrome (Mac OS)"
+// FormatDevicePropsOs 已废弃：不再使用此函数
+// 当 PlatformType 是浏览器类型时，Os 字段应该只包含操作系统名称
+// WhatsApp 会根据 PlatformType 自动添加浏览器名称前缀
+// 保留此函数仅用于向后兼容，但不应再调用
+// Deprecated: 使用 getOSDisplayName 直接返回操作系统名称
 func FormatDevicePropsOs(browserName, osName string) string {
 	osDisplayName := getOSDisplayNameForFormat(osName)
-	return browserName + " (" + osDisplayName + ")"
+	return osDisplayName // 只返回操作系统名称，不包含浏览器名称
 }
 
 // getOSDisplayNameForFormat 将操作系统名称转换为显示名称（用于格式化）
