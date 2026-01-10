@@ -33,8 +33,10 @@ import (
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	"go.mau.fi/whatsmeow/util/fingerprint"
 	"go.mau.fi/whatsmeow/util/keys"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
@@ -280,7 +282,60 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 		"ib":           cli.handleIB,
 		// Apparently there's also an <error> node which can have a code=479 and means "Invalid stanza sent (smax-invalid)"
 	}
+
+	// Automatically setup fingerprint callback if Container has fingerprint configuration
+	setupFingerprintIfEnabled(cli, deviceStore)
+
 	return cli
+}
+
+// setupFingerprintIfEnabled automatically sets up the fingerprint callback if the Container
+// has fingerprint configuration enabled. This is called automatically by NewClient.
+func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
+	// Check if Container is sqlstore.Container
+	container, ok := deviceStore.Container.(*sqlstore.Container)
+	if !ok {
+		return
+	}
+
+	// If no region is configured, fingerprint is disabled
+	if !container.FingerprintRegion.IsValid() {
+		return
+	}
+
+	// Convert enum to string for GenerateFingerprint
+	regionCode := container.FingerprintRegion.String()
+
+	// Setup the callback (fully automated, no business layer intervention needed)
+	cli.GetClientPayload = func() *waWa6.ClientPayload {
+		payload := deviceStore.GetClientPayload()
+		jid := deviceStore.GetJID()
+
+		if jid == types.EmptyJID {
+			return payload
+		}
+
+		ctx := context.Background()
+		fp, err := container.GetFingerprint(ctx, jid)
+		if err != nil {
+			cli.Log.Warnf("Failed to get fingerprint: %v", err)
+			return payload
+		}
+
+		// Auto-generate if not exists (handled internally by the library)
+		if fp == nil {
+			fp = fingerprint.GenerateFingerprint(regionCode)
+			go func() {
+				_ = container.PutFingerprint(context.Background(), jid, fp)
+			}()
+		}
+
+		if fp != nil {
+			fingerprint.ApplyFingerprint(payload, fp)
+		}
+
+		return payload
+	}
 }
 
 // SetProxyAddress is a helper method that parses a URL string and calls SetProxy or SetSOCKSProxy based on the URL scheme.

@@ -30,9 +30,31 @@ type Container struct {
 	db     *dbutil.Database
 	log    waLog.Logger
 	LIDMap *CachedLIDMap
+
+	// FingerprintRegion 配置设备指纹生成的地区
+	// 如果为 Region_None（默认值），则不启用指纹功能
+	// 如果配置了有效地区（如 Region_IN），则自动启用指纹功能
+	FingerprintRegion Region
 }
 
 var _ store.DeviceContainer = (*Container)(nil)
+
+// ContainerOption is a function that configures a Container.
+type ContainerOption func(*Container)
+
+// WithFingerprintRegion 配置设备指纹生成的地区
+// 配置地区后，指纹功能会自动启用
+//
+// Example:
+//
+//	container, err := sqlstore.New(ctx, "postgres", "postgres://...", log,
+//		sqlstore.WithFingerprintRegion(sqlstore.Region_IN), // India region
+//	)
+func WithFingerprintRegion(region Region) ContainerOption {
+	return func(c *Container) {
+		c.FingerprintRegion = region
+	}
+}
 
 // New connects to the given SQL database and wraps it in a Container.
 //
@@ -43,12 +65,22 @@ var _ store.DeviceContainer = (*Container)(nil)
 // When using SQLite, it's strongly recommended to enable foreign keys by adding `?_foreign_keys=true`:
 //
 //	container, err := sqlstore.New(context.Background(), "sqlite3", "file:yoursqlitefile.db?_foreign_keys=on", nil)
-func New(ctx context.Context, dialect, address string, log waLog.Logger) (*Container, error) {
+//
+// To enable automatic device fingerprint generation:
+//
+//	container, err := sqlstore.New(ctx, "postgres", "postgres://...", log,
+//		sqlstore.WithFingerprintRegion(sqlstore.Region_IN), // India region
+//	)
+func New(ctx context.Context, dialect, address string, log waLog.Logger, opts ...ContainerOption) (*Container, error) {
 	db, err := sql.Open(dialect, address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 	container := NewWithDB(db, dialect, log)
+	// Apply options
+	for _, opt := range opts {
+		opt(container)
+	}
 	err = container.Upgrade(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upgrade database: %w", err)
