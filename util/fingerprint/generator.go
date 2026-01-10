@@ -276,7 +276,13 @@ func generateAndroidBuildNumber(osVersions []string) string {
 	// 生成修订号（3位数字）
 	revision := mathRand.Intn(1000)
 
-	return fmt.Sprintf("%s%d.%02d%02d%02d.%03d", prefix, mathRand.Intn(2)+1, year, month, day, revision)
+	// Android 构建号格式：TP1A.220624.014
+	// 格式：[RTSU]Q[1-3][A-Z].[YYMMDD].[3位数字]
+	// 字母部分通常是 A，但也可能是其他字母（B, C 等）
+	buildLetter := byte('A' + mathRand.Intn(3)) // A, B, 或 C
+	buildNumber := mathRand.Intn(3) + 1         // 1, 2, 或 3
+
+	return fmt.Sprintf("%s%d%c.%02d%02d%02d.%03d", prefix, buildNumber, buildLetter, year, month, day, revision)
 }
 
 // generateIOSBuildNumber 生成 iOS/macOS 构建号

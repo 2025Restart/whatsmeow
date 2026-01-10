@@ -16,7 +16,29 @@ import (
 
 // ApplyFingerprint 应用设备指纹到 ClientPayload
 func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint) {
-	if payload == nil || fp == nil {
+	if payload == nil {
+		return
+	}
+
+	// 即使指纹为空，也检查并覆盖非官方标识（三重保障）
+	if payload.DevicePairingData != nil && len(payload.DevicePairingData.DeviceProps) > 0 {
+		var existingProps waCompanionReg.DeviceProps
+		if err := proto.Unmarshal(payload.DevicePairingData.DeviceProps, &existingProps); err == nil {
+			if existingProps.Os != nil && *existingProps.Os == "whatsmeow" {
+				// 强制覆盖非官方标识
+				if fp != nil && fp.DevicePropsOs != "" {
+					existingProps.Os = proto.String(fp.DevicePropsOs)
+				} else {
+					existingProps.Os = proto.String("Linux") // 默认值
+				}
+				devicePropsBytes, _ := proto.Marshal(&existingProps)
+				payload.DevicePairingData.DeviceProps = devicePropsBytes
+			}
+		}
+	}
+
+	// 如果指纹为空，直接返回（已处理非官方标识）
+	if fp == nil {
 		return
 	}
 
@@ -41,12 +63,14 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 	if fp.OsBuildNumber != "" {
 		payload.UserAgent.OsBuildNumber = proto.String(fp.OsBuildNumber)
 	}
+	// 强制应用 MCC/MNC（即使为空也要覆盖默认值 "000"）
 	if fp.Mcc != "" {
 		payload.UserAgent.Mcc = proto.String(fp.Mcc)
 	}
 	if fp.Mnc != "" {
 		payload.UserAgent.Mnc = proto.String(fp.Mnc)
 	}
+	// 强制应用语言和国家（即使为空也要覆盖默认值）
 	if fp.LocaleLanguage != "" {
 		payload.UserAgent.LocaleLanguageIso6391 = proto.String(fp.LocaleLanguage)
 	}

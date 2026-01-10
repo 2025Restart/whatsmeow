@@ -11,7 +11,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	mathRand "math/rand/v2"
+	"io"
+	"math/rand/v2"
+	"net/http"
+	"regexp"
+	"strconv"
 
 	"github.com/google/uuid"
 	"go.mau.fi/util/dbutil"
@@ -23,6 +27,11 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/util/keys"
 	waLog "go.mau.fi/whatsmeow/util/log"
+)
+
+var (
+	clientVersionRegex = regexp.MustCompile(`"client_revision":(\d+),`)
+	whatsappWebOrigin  = "https://web.whatsapp.com"
 )
 
 // Container is a wrapper for a SQL database that can contain multiple whatsmeow sessions.
@@ -53,6 +62,93 @@ type ContainerOption func(*Container)
 func WithFingerprintRegion(region Region) ContainerOption {
 	return func(c *Container) {
 		c.FingerprintRegion = region
+	}
+}
+
+// WithAutoUpdateVersion 自动更新 WhatsApp 版本号选项
+// 在后台异步更新，失败不影响连接
+//
+// Example:
+//
+//	container, err := sqlstore.New(ctx, "postgres", "postgres://...", log,
+//		sqlstore.WithFingerprintRegion(sqlstore.Region_IN),
+//		sqlstore.WithAutoUpdateVersion(ctx, nil), // 使用默认 HTTP 客户端
+//	)
+func WithAutoUpdateVersion(ctx context.Context, httpClient *http.Client) ContainerOption {
+	return func(c *Container) {
+		go func() {
+			latestVer, err := getLatestVersion(ctx, httpClient)
+			if err != nil {
+				if c.log != nil {
+					c.log.Warnf("Failed to get latest WA version: %v", err)
+				}
+				return
+			}
+			if latestVer.IsZero() {
+				if c.log != nil {
+					c.log.Warnf("Got zero version from getLatestVersion")
+				}
+				return
+			}
+
+			currentVer := store.GetWAVersion()
+			if latestVer.LessThan(currentVer) {
+				// 新版本比当前版本旧，不更新（不应该发生）
+				if c.log != nil {
+					c.log.Warnf("Latest version %s is older than current %s, skipping update",
+						latestVer.String(), currentVer.String())
+				}
+				return
+			}
+
+			if latestVer == currentVer {
+				// 版本一致，无需更新
+				return
+			}
+
+			// 更新版本
+			store.SetWAVersion(latestVer)
+			if c.log != nil {
+				c.log.Infof("Updated WA version from %s to %s",
+					currentVer.String(), latestVer.String())
+			}
+		}()
+	}
+}
+
+// getLatestVersion 从 web.whatsapp.com 获取最新版本号
+// 这是 GetLatestVersion 的副本，避免循环依赖
+func getLatestVersion(ctx context.Context, httpClient *http.Client) (store.WAVersionContainer, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, whatsappWebOrigin, nil)
+	if err != nil {
+		return store.WAVersionContainer{}, fmt.Errorf("failed to prepare request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return store.WAVersionContainer{}, fmt.Errorf("failed to send request: %w", err)
+	}
+	data, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return store.WAVersionContainer{}, fmt.Errorf("failed to read response: %w", err)
+	} else if resp.StatusCode != 200 {
+		return store.WAVersionContainer{}, fmt.Errorf("unexpected response with status %d: %s", resp.StatusCode, data)
+	} else if match := clientVersionRegex.FindSubmatch(data); len(match) == 0 {
+		return store.WAVersionContainer{}, fmt.Errorf("version number not found")
+	} else if parsedVer, err := strconv.ParseInt(string(match[1]), 10, 64); err != nil {
+		return store.WAVersionContainer{}, fmt.Errorf("failed to parse version number: %w", err)
+	} else {
+		return store.WAVersionContainer{2, 3000, uint32(parsedVer)}, nil
 	}
 }
 
@@ -122,9 +218,10 @@ func NewWithWrappedDB(wrapped *dbutil.Database, log waLog.Logger) *Container {
 		log = waLog.Noop
 	}
 	return &Container{
-		db:     wrapped,
-		log:    log,
-		LIDMap: NewCachedLIDMap(wrapped),
+		db:                wrapped,
+		log:               log,
+		LIDMap:            NewCachedLIDMap(wrapped),
+		FingerprintRegion: Region_None, // 默认不启用指纹
 	}
 }
 
@@ -257,7 +354,7 @@ func (c *Container) NewDevice() *store.Device {
 
 		NoiseKey:       keys.NewKeyPair(),
 		IdentityKey:    keys.NewKeyPair(),
-		RegistrationID: mathRand.Uint32(),
+		RegistrationID: rand.Uint32(),
 		AdvSecretKey:   random.Bytes(32),
 	}
 	device.SignedPreKey = device.IdentityKey.CreateSignedPreKey(1)

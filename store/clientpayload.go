@@ -125,7 +125,7 @@ var BaseClientPayload = &waWa6.ClientPayload{
 }
 
 var DeviceProps = &waCompanionReg.DeviceProps{
-	Os: proto.String("whatsmeow"),
+	Os: proto.String("Linux"),
 	Version: &waCompanionReg.DeviceProps_AppVersion{
 		Primary:   proto.Uint32(0),
 		Secondary: proto.Uint32(1),
@@ -169,6 +169,10 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 	binary.BigEndian.PutUint32(regID, device.RegistrationID)
 	preKeyID := make([]byte, 4)
 	binary.BigEndian.PutUint32(preKeyID, device.SignedPreKey.KeyID)
+	// 确保 DeviceProps.Os 不是非官方标识（双重保障）
+	if DeviceProps.Os != nil && *DeviceProps.Os == "whatsmeow" {
+		DeviceProps.Os = proto.String("Linux")
+	}
 	deviceProps, _ := proto.Marshal(DeviceProps)
 	payload.DevicePairingData = &waWa6.ClientPayload_DevicePairingRegistrationData{
 		ERegid:      regID,
