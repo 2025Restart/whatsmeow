@@ -2,8 +2,6 @@ module go.mau.fi/whatsmeow
 
 go 1.24.0
 
-toolchain go1.25.5
-
 require (
 	github.com/beeper/argo-go v1.1.2
 	github.com/coder/websocket v1.8.14
