@@ -164,7 +164,7 @@ var DeviceProps = &waCompanionReg.DeviceProps{
 		CompleteOnDemandReady:                    nil,
 		ThumbnailSyncDaysLimit:                   nil,
 	},
-	PlatformType:    waCompanionReg.DeviceProps_UNKNOWN.Enum(),
+	PlatformType:    waCompanionReg.DeviceProps_CHROME.Enum(), // 默认 Chrome 以显示浏览器图标
 	RequireFullSync: proto.Bool(false),
 }
 

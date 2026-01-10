@@ -7,6 +7,8 @@
 package fingerprint
 
 import (
+	"strings"
+
 	"google.golang.org/protobuf/proto"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
@@ -28,8 +30,17 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 				// 强制覆盖非官方标识
 				if fp != nil && fp.DevicePropsOs != "" {
 					existingProps.Os = proto.String(fp.DevicePropsOs)
+					// 同时设置 PlatformType 以显示图标
+					if fp.PlatformType != nil {
+						existingProps.PlatformType = fp.PlatformType
+					} else {
+						// 根据 Os 内容推断 PlatformType
+						existingProps.PlatformType = inferPlatformTypeFromOs(fp.DevicePropsOs)
+					}
 				} else {
 					existingProps.Os = proto.String(DefaultDevicePropsOs) // 使用统一管理的默认值
+					// 默认使用 CHROME 以显示图标
+					existingProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 				}
 				devicePropsBytes, _ := proto.Marshal(&existingProps)
 				payload.DevicePairingData.DeviceProps = devicePropsBytes
@@ -111,8 +122,12 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 				deviceProps.Version = fp.DevicePropsVersion
 			}
 
+			// 设置 PlatformType（用于显示浏览器图标）
 			if fp.PlatformType != nil {
 				deviceProps.PlatformType = fp.PlatformType
+			} else {
+				// 如果 PlatformType 未设置，根据 Os 内容推断
+				deviceProps.PlatformType = inferPlatformTypeFromOs(fp.DevicePropsOs)
 			}
 
 			// 保留其他重要字段（从现有或使用默认值）
@@ -145,4 +160,31 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 			payload.DevicePairingData.DeviceProps = devicePropsBytes
 		}
 	}
+}
+
+// inferPlatformTypeFromOs 根据 DeviceProps.Os 的内容推断 PlatformType
+// 用于确保浏览器图标能正确显示
+func inferPlatformTypeFromOs(osValue string) *waCompanionReg.DeviceProps_PlatformType {
+	if osValue == "" {
+		return waCompanionReg.DeviceProps_CHROME.Enum() // 默认 Chrome
+	}
+
+	// 根据浏览器名称推断 PlatformType
+	osLower := strings.ToLower(osValue)
+	if strings.Contains(osLower, "chrome") {
+		return waCompanionReg.DeviceProps_CHROME.Enum()
+	} else if strings.Contains(osLower, "firefox") {
+		return waCompanionReg.DeviceProps_FIREFOX.Enum()
+	} else if strings.Contains(osLower, "safari") {
+		return waCompanionReg.DeviceProps_SAFARI.Enum()
+	} else if strings.Contains(osLower, "edge") {
+		return waCompanionReg.DeviceProps_EDGE.Enum()
+	} else if strings.Contains(osLower, "opera") {
+		return waCompanionReg.DeviceProps_OPERA.Enum()
+	} else if strings.Contains(osLower, "internet explorer") || strings.Contains(osLower, "ie ") {
+		return waCompanionReg.DeviceProps_IE.Enum()
+	}
+
+	// 默认返回 Chrome（因为大多数 Web 平台使用 Chrome）
+	return waCompanionReg.DeviceProps_CHROME.Enum()
 }
