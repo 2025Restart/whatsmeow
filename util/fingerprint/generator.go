@@ -53,8 +53,8 @@ func generateFromConfig(config *RegionConfig) *store.DeviceFingerprint {
 	// 4. 选择 OS 版本
 	osVersion := selectOSVersion(platformDist)
 
-	// 5. 生成构建号
-	osBuildNumber := generateBuildNumber()
+	// 5. 生成构建号（根据平台类型）
+	osBuildNumber := generateBuildNumber(platformDist)
 
 	// 6. 选择移动网络（MCC/MNC）
 	mcc, mnc := selectMobileNetwork(config, country)
@@ -205,29 +205,139 @@ func buildFingerprint(
 		LocaleLanguage:  lang,
 		LocaleCountry:   country,
 		Platform:        &platformDist.Platform,
-		AppVersion: &waWa6.ClientPayload_UserAgent_AppVersion{
-			Primary:   proto.Uint32(uint32(mathRand.Intn(3) + 2)),
-			Secondary: proto.Uint32(uint32(mathRand.Intn(3000) + 2000)),
-			Tertiary:  proto.Uint32(uint32(mathRand.Intn(1000000000))),
-		},
-		DeviceType:    &platformDist.DeviceType,
-		DeviceBoard:   board,
-		DevicePropsOs: platformDist.OSName,
-		DevicePropsVersion: &waCompanionReg.DeviceProps_AppVersion{
-			Primary:   proto.Uint32(uint32(mathRand.Intn(5) + 10)),
-			Secondary: proto.Uint32(uint32(mathRand.Intn(10))),
-			Tertiary:  proto.Uint32(uint32(mathRand.Intn(10))),
-		},
-		PlatformType: &platformDist.PlatformType,
+		AppVersion:      store.GetWAVersion().ProtoAppVersion(), // 使用底层 API 获取最新版本
+		DeviceType:      &platformDist.DeviceType,
+		DeviceBoard:     board,
+		DevicePropsOs:   platformDist.OSName,
+		DevicePropsVersion: generateDevicePropsVersion(platformDist),
+		PlatformType:    &platformDist.PlatformType,
 	}
 }
 
 // generateBuildNumber 生成构建号
-func generateBuildNumber() string {
-	major := mathRand.Intn(5) + 20
-	minor := mathRand.Intn(10)
-	patch := mathRand.Intn(100)
-	return fmt.Sprintf("%d%02d%02d", major, minor, patch)
+func generateBuildNumber(platformDist PlatformDistribution) string {
+	switch platformDist.PlatformType {
+	case waCompanionReg.DeviceProps_ANDROID_PHONE, waCompanionReg.DeviceProps_ANDROID_TABLET:
+		return generateAndroidBuildNumber(platformDist.OSVersions)
+	case waCompanionReg.DeviceProps_IOS_PHONE, waCompanionReg.DeviceProps_IPAD:
+		return generateIOSBuildNumber(platformDist.OSVersions)
+	default:
+		// 默认格式
+		major := mathRand.Intn(5) + 20
+		minor := mathRand.Intn(10)
+		patch := mathRand.Intn(100)
+		return fmt.Sprintf("%d%02d%02d", major, minor, patch)
+	}
+}
+
+// generateAndroidBuildNumber 生成 Android 构建号
+// 格式示例：TP1A.220624.014 (Android 13), UQ1A.231205.015 (Android 14)
+func generateAndroidBuildNumber(osVersions []string) string {
+	if len(osVersions) == 0 {
+		return "TP1A.220624.014"
+	}
+	
+	// 根据 OS 版本选择构建号前缀
+	version := osVersions[mathRand.Intn(len(osVersions))]
+	var prefix string
+	switch version {
+	case "11":
+		prefix = "RQ"
+	case "12":
+		prefix = "SP"
+	case "13":
+		prefix = "TP"
+	case "14":
+		prefix = "UQ"
+	default:
+		prefix = "TP" // 默认 Android 13
+	}
+	
+	// 生成日期部分（YYMMDD）
+	year := 22 + mathRand.Intn(3) // 22-24
+	month := 1 + mathRand.Intn(12)
+	day := 1 + mathRand.Intn(28)
+	
+	// 生成修订号（3位数字）
+	revision := mathRand.Intn(1000)
+	
+	return fmt.Sprintf("%s%d.%02d%02d%02d.%03d", prefix, mathRand.Intn(2)+1, year, month, day, revision)
+}
+
+// generateIOSBuildNumber 生成 iOS/macOS 构建号
+// 格式示例：20G95 (macOS 12.6.1), 21G115 (macOS 13.5.2)
+func generateIOSBuildNumber(osVersions []string) string {
+	if len(osVersions) == 0 {
+		return "20G95"
+	}
+	
+	version := osVersions[mathRand.Intn(len(osVersions))]
+	var major int
+	switch version {
+	case "15":
+		major = 20
+	case "16":
+		major = 21
+	case "17":
+		major = 22
+	default:
+		major = 21 // 默认 iOS 16
+	}
+	
+	// 生成小版本和修订号
+	minor := mathRand.Intn(10) + 1 // 1-10
+	patch := mathRand.Intn(200) + 1 // 1-200
+	
+	return fmt.Sprintf("%dG%d", major, minor*10+patch)
+}
+
+// generateDevicePropsVersion 生成 DeviceProps 版本
+// 根据 OS 版本生成对应的版本号
+func generateDevicePropsVersion(platformDist PlatformDistribution) *waCompanionReg.DeviceProps_AppVersion {
+	if len(platformDist.OSVersions) == 0 {
+		return &waCompanionReg.DeviceProps_AppVersion{
+			Primary:   proto.Uint32(13),
+			Secondary: proto.Uint32(5),
+			Tertiary:  proto.Uint32(2),
+		}
+	}
+	
+	osVersion := platformDist.OSVersions[mathRand.Intn(len(platformDist.OSVersions))]
+	
+	switch platformDist.PlatformType {
+	case waCompanionReg.DeviceProps_ANDROID_PHONE, waCompanionReg.DeviceProps_ANDROID_TABLET:
+		// Android 版本：11, 12, 13, 14 -> DeviceProps: {11, 0, 0}, {12, 0, 0}, etc.
+		version := parseVersion(osVersion)
+		return &waCompanionReg.DeviceProps_AppVersion{
+			Primary:   proto.Uint32(version),
+			Secondary: proto.Uint32(uint32(mathRand.Intn(10))),
+			Tertiary:  proto.Uint32(uint32(mathRand.Intn(10))),
+		}
+	case waCompanionReg.DeviceProps_IOS_PHONE, waCompanionReg.DeviceProps_IPAD:
+		// iOS 版本：15.x, 16.x, 17.x -> DeviceProps: {15, x, y}, {16, x, y}, etc.
+		version := parseVersion(osVersion)
+		return &waCompanionReg.DeviceProps_AppVersion{
+			Primary:   proto.Uint32(version),
+			Secondary: proto.Uint32(uint32(mathRand.Intn(10))),
+			Tertiary:  proto.Uint32(uint32(mathRand.Intn(10))),
+		}
+	default:
+		return &waCompanionReg.DeviceProps_AppVersion{
+			Primary:   proto.Uint32(13),
+			Secondary: proto.Uint32(5),
+			Tertiary:  proto.Uint32(2),
+		}
+	}
+}
+
+// parseVersion 解析版本号字符串为数字
+func parseVersion(version string) uint32 {
+	var v uint32
+	fmt.Sscanf(version, "%d", &v)
+	if v == 0 {
+		return 13 // 默认
+	}
+	return v
 }
 
 // getDefaultMCCByCountry 根据国家获取默认 MCC
