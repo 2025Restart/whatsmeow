@@ -618,3 +618,18 @@ type NewsletterLiveUpdate struct {
 	Time     time.Time
 	Messages []*types.NewsletterMessage
 }
+
+// ReachoutTimelock is emitted when the server sends a rate limit notification.
+//
+// This indicates that the account has been rate-limited for sending messages.
+// Business layer should pause sending messages until the time limit expires.
+type ReachoutTimelock struct {
+	// EnforcementType specifies the type of enforcement (e.g., "DEFAULT")
+	EnforcementType string
+	// IsActive indicates whether the rate limit is currently active
+	IsActive bool
+	// TimeEnds is when the rate limit will expire
+	TimeEnds time.Time
+	// Timestamp is when this notification was received
+	Timestamp time.Time
+}

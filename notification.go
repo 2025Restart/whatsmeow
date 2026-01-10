@@ -10,7 +10,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strconv"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -367,7 +370,26 @@ type newsletterEvent struct {
 	// _on_state_change -> id, is_requestor, state
 }
 
+// reachoutTimelockPayload represents the payload structure for reachout timelock notifications
+type reachoutTimelockPayload struct {
+	EnforcementType interface{} `json:"enforcement_type"` // Usually "DEFAULT", but could be other types
+	IsActive        bool        `json:"is_active"`
+	TimeEnds        interface{} `json:"time_enforcement_ends"` // Unix timestamp in seconds (may be string or number)
+}
+
+// mexEventData represents all possible mex event types in a unified structure
+type mexEventData struct {
+	// Newsletter events
+	NewsletterJoin       *events.NewsletterJoin       `json:"xwa2_notify_newsletter_on_join"`
+	NewsletterLeave      *events.NewsletterLeave       `json:"xwa2_notify_newsletter_on_leave"`
+	NewsletterMuteChange *events.NewsletterMuteChange `json:"xwa2_notify_newsletter_on_mute_change"`
+	// Reachout timelock event
+	ReachoutTimelock *reachoutTimelockPayload `json:"xwa2_notify_account_reachout_timelock"`
+}
+
 func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Node) {
+	ag := node.AttrGetter()
+	timestamp := ag.UnixTime("t")
 	for _, child := range node.GetChildren() {
 		if child.Tag != "update" {
 			continue
@@ -376,8 +398,49 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 		if !ok {
 			continue
 		}
+		// First, try to parse as the new unified structure
+		var unifiedData struct {
+			Data mexEventData `json:"data"`
+		}
+		err := json.Unmarshal(childData, &unifiedData)
+		if err == nil {
+			// Successfully parsed, check for reachout timelock first
+			if unifiedData.Data.ReachoutTimelock != nil {
+				timelock := unifiedData.Data.ReachoutTimelock
+				timeEnds, err := parseTimestamp(timelock.TimeEnds)
+				if err != nil {
+					cli.Log.Warnf("Failed to parse time_enforcement_ends: %v", err)
+					timeEnds = time.Time{} // Zero time if parsing fails
+				}
+				enforcementType := parseString(timelock.EnforcementType)
+				cli.dispatchEvent(&events.ReachoutTimelock{
+					EnforcementType: enforcementType,
+					IsActive:        timelock.IsActive,
+					TimeEnds:         timeEnds,
+					Timestamp:        timestamp,
+				})
+				continue
+			}
+			// Check for newsletter events
+			if unifiedData.Data.NewsletterJoin != nil {
+				cli.dispatchEvent(unifiedData.Data.NewsletterJoin)
+				continue
+			}
+			if unifiedData.Data.NewsletterLeave != nil {
+				cli.dispatchEvent(unifiedData.Data.NewsletterLeave)
+				continue
+			}
+			if unifiedData.Data.NewsletterMuteChange != nil {
+				cli.dispatchEvent(unifiedData.Data.NewsletterMuteChange)
+				continue
+			}
+			// If unified structure parsed successfully but no known event found, skip fallback
+			// (unified structure already covers all known event types)
+			continue
+		}
+		// Fallback to old structure for backward compatibility
 		var wrapper newsLetterEventWrapper
-		err := json.Unmarshal(childData, &wrapper)
+		err = json.Unmarshal(childData, &wrapper)
 		if err != nil {
 			cli.Log.Errorf("Failed to unmarshal JSON in mex event: %v", err)
 			continue
@@ -389,6 +452,42 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 		} else if wrapper.Data.MuteChange != nil {
 			cli.dispatchEvent(wrapper.Data.MuteChange)
 		}
+	}
+}
+
+// parseTimestamp parses a timestamp that may be a string or number
+func parseTimestamp(v interface{}) (time.Time, error) {
+	switch val := v.(type) {
+	case string:
+		unix, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return time.Unix(unix, 0), nil
+	case float64:
+		// JSON numbers are parsed as float64
+		return time.Unix(int64(val), 0), nil
+	case int64:
+		return time.Unix(val, 0), nil
+	case int:
+		return time.Unix(int64(val), 0), nil
+	default:
+		return time.Time{}, fmt.Errorf("unexpected timestamp type: %T", v)
+	}
+}
+
+// parseString safely converts interface{} to string
+func parseString(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case []byte:
+		return string(val)
+	default:
+		return fmt.Sprintf("%v", val)
 	}
 }
 
