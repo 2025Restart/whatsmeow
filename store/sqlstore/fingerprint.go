@@ -79,6 +79,13 @@ func (c *Container) GetFingerprint(ctx context.Context, jid types.JID) (*store.D
 		return nil, fmt.Errorf("failed to get fingerprint: %w", err)
 	}
 
+	// 记录日志：哪个 phone 使用了哪个指纹信息（只记录一次，在读取时）
+	if c.log != nil {
+		c.log.Infof("Using fingerprint for %s: %s %s (%s %s), MCC: %s, Language: %s, Country: %s",
+			jid.User, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
+			fp.Mcc, fp.LocaleLanguage, fp.LocaleCountry)
+	}
+
 	// 转换枚举值
 	if platform.Valid {
 		p := waWa6.ClientPayload_UserAgent_Platform(platform.Int32)
@@ -146,6 +153,13 @@ func (c *Container) PutFingerprint(ctx context.Context, jid types.JID, fp *store
 	)
 	if err != nil {
 		return fmt.Errorf("failed to put fingerprint: %w", err)
+	}
+
+	// 记录日志：保存指纹信息（只记录一次，在保存时）
+	if c.log != nil {
+		c.log.Infof("Saved fingerprint for %s: %s %s (%s %s), MCC: %s, Language: %s, Country: %s",
+			jid.User, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
+			fp.Mcc, fp.LocaleLanguage, fp.LocaleCountry)
 	}
 	return nil
 }
