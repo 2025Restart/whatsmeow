@@ -200,6 +200,12 @@ type Client struct {
 	// The library is currently embedded in mautrix-meta (https://github.com/mautrix/meta), but may be separated later.
 	MessengerConfig *MessengerConfig
 	RefreshCAT      func(context.Context) error
+
+	// CarrierInfo 外部传入的运营商信息（优先级最高）
+	// 如果业务层通过前置探测获取到代理 IP 的运营商信息，应调用 SetCarrierInfo 设置
+	// 优先级：外部传入 > 手机号匹配 > 默认值
+	carrierInfo     *CarrierInfo
+	carrierInfoLock sync.RWMutex
 }
 
 type groupMetaCache struct {
@@ -212,6 +218,13 @@ type MessengerConfig struct {
 	UserAgent    string
 	BaseURL      string
 	WebsocketURL string
+}
+
+// CarrierInfo 运营商信息（从代理 IP 探测获取）
+type CarrierInfo struct {
+	MCC          string // 移动国家代码 (如 "404", "405", "724")
+	MNC          string // 移动网络代码 (如 "10", "20", "874")
+	OperatorName string // 运营商名称 (如 "Airtel", "Jio", "Vivo")
 }
 
 // Size of buffer for the channel that all incoming XML nodes go through.
@@ -521,16 +534,29 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		}
 
 		if fp != nil {
-			// 在应用指纹前，先根据手机号段校准 MCC/MNC (解决 odn 增加的问题)
-			if phoneInfo := fingerprint.LookupPhoneRegion(phone); phoneInfo != nil {
-				// 如果指纹中的 MCC 为空，或者与号段标识的 MCC 不符，执行强制修正
-				if fp.Mcc == "" || fp.Mcc != phoneInfo.MCC || (fp.Mcc == "404" && phoneInfo.MCC == "405") || (fp.Mcc == "405" && phoneInfo.MCC == "404") {
-					if cli.Log != nil && (fp.Mcc != phoneInfo.MCC || fp.Mnc != phoneInfo.MNC) {
-						cli.Log.Debugf("[Fingerprint] Calibrating MCC/MNC for phone %s: %s-%s -> %s-%s (%s)",
-							phone, fp.Mcc, fp.Mnc, phoneInfo.MCC, phoneInfo.MNC, phoneInfo.OperatorName)
+			// 优先级：外部传入的运营商信息 > 手机号匹配 > 默认值
+			// 1. 优先使用外部传入的运营商信息（从代理 IP 探测获取）
+			carrierInfo := cli.getCarrierInfo()
+			if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
+				// 外部传入的运营商信息优先级最高，直接覆盖
+				if cli.Log != nil && (fp.Mcc != carrierInfo.MCC || fp.Mnc != carrierInfo.MNC) {
+					cli.Log.Infof("[Fingerprint] Using carrier info from proxy IP: %s-%s (%s) -> overriding fingerprint MCC/MNC: %s-%s -> %s-%s",
+						carrierInfo.MCC, carrierInfo.MNC, carrierInfo.OperatorName, fp.Mcc, fp.Mnc, carrierInfo.MCC, carrierInfo.MNC)
+				}
+				fp.Mcc = carrierInfo.MCC
+				fp.Mnc = carrierInfo.MNC
+			} else {
+				// 2. 兜底策略：根据手机号段校准 MCC/MNC
+				if phoneInfo := fingerprint.LookupPhoneRegion(phone); phoneInfo != nil {
+					// 如果指纹中的 MCC 为空，或者与号段标识的 MCC 不符，执行强制修正
+					if fp.Mcc == "" || fp.Mcc != phoneInfo.MCC || (fp.Mcc == "404" && phoneInfo.MCC == "405") || (fp.Mcc == "405" && phoneInfo.MCC == "404") {
+						if cli.Log != nil && (fp.Mcc != phoneInfo.MCC || fp.Mnc != phoneInfo.MNC) {
+							cli.Log.Debugf("[Fingerprint] Calibrating MCC/MNC for phone %s (fallback): %s-%s -> %s-%s (%s)",
+								phone, fp.Mcc, fp.Mnc, phoneInfo.MCC, phoneInfo.MNC, phoneInfo.OperatorName)
+						}
+						fp.Mcc = phoneInfo.MCC
+						fp.Mnc = phoneInfo.MNC
 					}
-					fp.Mcc = phoneInfo.MCC
-					fp.Mnc = phoneInfo.MNC
 				}
 			}
 			
@@ -538,6 +564,50 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		}
 
 		return payload
+	}
+}
+
+// SetCarrierInfo 设置外部传入的运营商信息（从代理 IP 探测获取）
+// 优先级：外部传入 > 手机号匹配 > 默认值
+// 如果业务层通过前置探测获取到代理 IP 的运营商信息，应调用此方法设置
+// 参数：
+//   - mcc: 移动国家代码 (如 "404", "405", "724")
+//   - mnc: 移动网络代码 (如 "10", "20", "874")
+//   - operatorName: 运营商名称 (如 "Airtel", "Jio", "Vivo")
+func (cli *Client) SetCarrierInfo(mcc, mnc, operatorName string) {
+	cli.carrierInfoLock.Lock()
+	defer cli.carrierInfoLock.Unlock()
+	
+	if mcc != "" && mnc != "" {
+		cli.carrierInfo = &CarrierInfo{
+			MCC:          mcc,
+			MNC:          mnc,
+			OperatorName: operatorName,
+		}
+		if cli.Log != nil {
+			cli.Log.Infof("[Fingerprint] Set carrier info from proxy IP: MCC=%s, MNC=%s, Operator=%s", mcc, mnc, operatorName)
+		}
+	} else {
+		cli.carrierInfo = nil
+		if cli.Log != nil {
+			cli.Log.Debugf("[Fingerprint] Cleared carrier info (empty MCC/MNC provided)")
+		}
+	}
+}
+
+// getCarrierInfo 获取当前设置的运营商信息（线程安全）
+// 返回值的副本，避免并发修改问题
+func (cli *Client) getCarrierInfo() *CarrierInfo {
+	cli.carrierInfoLock.RLock()
+	defer cli.carrierInfoLock.RUnlock()
+	if cli.carrierInfo == nil {
+		return nil
+	}
+	// 返回副本，避免外部修改导致并发问题
+	return &CarrierInfo{
+		MCC:          cli.carrierInfo.MCC,
+		MNC:          cli.carrierInfo.MNC,
+		OperatorName: cli.carrierInfo.OperatorName,
 	}
 }
 
@@ -901,6 +971,8 @@ func (cli *Client) Disconnect() {
 	if hadPending && cli.Log != nil {
 		cli.Log.Infof("[Fingerprint] Disconnect: cleared pending fingerprint from memory (database fingerprints preserved)")
 	}
+	// 注意：不清理 carrierInfo，因为它是外部传入的，可能需要在下次连接时继续使用
+	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "", "")
 }
 
 // ResetConnection disconnects from the WhatsApp web websocket and forces an automatic reconnection.
@@ -969,6 +1041,8 @@ func (cli *Client) Logout(ctx context.Context) error {
 	if hadPending && cli.Log != nil {
 		cli.Log.Infof("[Fingerprint] Logout: cleared pending fingerprint from memory")
 	}
+	// 注意：不清理 carrierInfo，因为它是外部传入的，可能需要在下次连接时继续使用
+	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "", "")
 	
 	// 删除实际 JID 的指纹（但保留电话号码 JID 的临时指纹，供下次配对使用）
 	if container, ok := cli.Store.Container.(*sqlstore.Container); ok {
