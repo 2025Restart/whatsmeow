@@ -100,19 +100,36 @@ func (cli *Client) handlePictureNotification(ctx context.Context, node *waBinary
 }
 
 func (cli *Client) handleDeviceNotification(ctx context.Context, node *waBinary.Node) {
-	cli.userDevicesCacheLock.Lock()
-	defer cli.userDevicesCacheLock.Unlock()
 	ag := node.AttrGetter()
 	from := ag.JID("from")
 	fromLID := ag.OptionalJID("lid")
 	if fromLID != nil {
 		cli.StoreLIDPNMapping(ctx, *fromLID, from)
 	}
+
+	// Check cache and handle missing cache case
+	cli.userDevicesCacheLock.Lock()
 	cached, ok := cli.userDevicesCache[from]
 	if !ok {
-		cli.Log.Debugf("No device list cached for %s, ignoring device list notification", from)
+		// Cache is empty, check if query is already in progress
+		cli.userDevicesCacheLock.Unlock()
+		cli.pendingDeviceQueriesLock.Lock()
+		_, querying := cli.pendingDeviceQueries[from]
+		if !querying {
+			// Mark as querying and start async query
+			cli.pendingDeviceQueries[from] = struct{}{}
+			cli.pendingDeviceQueriesLock.Unlock()
+			cli.Log.Debugf("No device list cached for %s, querying device list proactively", from)
+			go cli.queryDeviceListForNotification(context.WithoutCancel(ctx), from, fromLID)
+		} else {
+			// Query already in progress, skip
+			cli.pendingDeviceQueriesLock.Unlock()
+			cli.Log.Debugf("No device list cached for %s, but query already in progress, ignoring device list notification", from)
+		}
 		return
 	}
+	// Cache exists, continue with normal processing
+	defer cli.userDevicesCacheLock.Unlock()
 	var cachedLID deviceCache
 	var cachedLIDHash string
 	if fromLID != nil {
@@ -170,6 +187,36 @@ func (cli *Client) handleDeviceNotification(ctx context.Context, node *waBinary.
 			}
 		}
 	}
+}
+
+// queryDeviceListForNotification proactively queries device list when notification is received but cache is empty.
+// This method runs asynchronously and updates the cache, allowing future notifications to be processed.
+func (cli *Client) queryDeviceListForNotification(ctx context.Context, jid types.JID, lid *types.JID) {
+	defer func() {
+		// Always clear the pending query marker, even if query fails
+		cli.pendingDeviceQueriesLock.Lock()
+		delete(cli.pendingDeviceQueries, jid)
+		cli.pendingDeviceQueriesLock.Unlock()
+	}()
+
+	// Query device list using the same method as GetUserDevices
+	// This uses context="message" and mode="query" which is lightweight and won't trigger background full sync
+	_, err := cli.GetUserDevices(ctx, []types.JID{jid})
+	if err != nil {
+		cli.Log.Warnf("Failed to proactively query device list for %s: %v", jid, err)
+		return
+	}
+
+	// Also query LID if provided
+	if lid != nil && !lid.IsEmpty() {
+		_, err := cli.GetUserDevices(ctx, []types.JID{*lid})
+		if err != nil {
+			cli.Log.Debugf("Failed to proactively query device list for LID %s: %v", *lid, err)
+			// Non-critical error, continue
+		}
+	}
+
+	cli.Log.Debugf("Successfully queried device list for %s, cache updated", jid)
 }
 
 func (cli *Client) handleFBDeviceNotification(ctx context.Context, node *waBinary.Node) {

@@ -137,10 +137,12 @@ type Client struct {
 
 	privacySettingsCache atomic.Value
 
-	groupCache           map[types.JID]*groupMetaCache
-	groupCacheLock       sync.Mutex
-	userDevicesCache     map[types.JID]deviceCache
-	userDevicesCacheLock sync.Mutex
+	groupCache              map[types.JID]*groupMetaCache
+	groupCacheLock          sync.Mutex
+	userDevicesCache        map[types.JID]deviceCache
+	userDevicesCacheLock    sync.Mutex
+	pendingDeviceQueries    map[types.JID]struct{}
+	pendingDeviceQueriesLock sync.Mutex
 
 	recentMessagesMap  map[recentMessageKey]RecentMessage
 	recentMessagesList [recentMessagesSize]recentMessageKey
@@ -255,8 +257,9 @@ func NewClient(deviceStore *store.Device, log waLog.Logger) *Client {
 
 		historySyncNotifications: make(chan *waE2E.HistorySyncNotification, 32),
 
-		groupCache:       make(map[types.JID]*groupMetaCache),
-		userDevicesCache: make(map[types.JID]deviceCache),
+		groupCache:           make(map[types.JID]*groupMetaCache),
+		userDevicesCache:     make(map[types.JID]deviceCache),
+		pendingDeviceQueries: make(map[types.JID]struct{}),
 
 		recentMessagesMap:      make(map[recentMessageKey]RecentMessage, recentMessagesSize),
 		sessionRecreateHistory: make(map[types.JID]time.Time),
