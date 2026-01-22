@@ -330,12 +330,35 @@ func (cli *Client) SendMessage(ctx context.Context, to types.JID, message *waE2E
 			err = fmt.Errorf("failed to get LID for PN %s: %w", to, err)
 			return
 		} else if toLID.IsEmpty() {
-			var info map[types.JID]types.UserInfo
-			info, err = cli.GetUserInfo(ctx, []types.JID{to})
-			if err != nil {
-				err = fmt.Errorf("failed to get user info for %s to fill LID cache: %w", to, err)
-				return
-			} else if toLID = info[to].LID; toLID.IsEmpty() {
+			// Use lightweight GetLIDOnly instead of GetUserInfo to avoid background full mode
+			cli.Log.Debugf("[SendMessage] LID cache miss for %s, calling GetLIDOnly (query+message mode)", to)
+			lidMap, lidErr := cli.GetLIDOnly(ctx, []types.JID{to})
+			if lidErr != nil {
+				// If GetLIDOnly fails, fall back to GetUserInfo for backward compatibility
+				cli.Log.Warnf("[SendMessage] GetLIDOnly failed for %s, falling back to GetUserInfo (background+full mode): %v", to, lidErr)
+				var info map[types.JID]types.UserInfo
+				info, err = cli.GetUserInfo(ctx, []types.JID{to})
+				if err != nil {
+					err = fmt.Errorf("failed to get user info for %s to fill LID cache: %w", to, err)
+					return
+				}
+				toLID = info[to].LID
+				if !toLID.IsEmpty() {
+					cli.Log.Debugf("[SendMessage] GetUserInfo fallback succeeded, found LID: %s -> %s", to, toLID)
+				} else {
+					cli.Log.Debugf("[SendMessage] GetUserInfo fallback completed but no LID found for %s", to)
+				}
+			} else {
+				// GetLIDOnly succeeded, check if LID was found
+				toLID = lidMap[to]
+				if !toLID.IsEmpty() {
+					cli.Log.Debugf("[SendMessage] GetLIDOnly succeeded, found LID: %s -> %s", to, toLID)
+				} else {
+					cli.Log.Debugf("[SendMessage] GetLIDOnly succeeded but no LID found for %s in response", to)
+				}
+			}
+
+			if toLID.IsEmpty() {
 				if !cli.EnablePNFallbackOnMissingLID {
 					err = fmt.Errorf("no LID found for %s from server", to)
 					return

@@ -94,6 +94,11 @@ func (cli *Client) handlePairSuccess(ctx context.Context, node *waBinary.Node) {
 	lid, _ := pairSuccess.GetChildByTag("device").Attrs["lid"].(types.JID)
 	platform, _ := pairSuccess.GetChildByTag("platform").Attrs["name"].(string)
 
+	cli.Log.Debugf("[PairSuccess] Server provided JID: %s, LID: %s (empty=%v)", jid, lid, lid.IsEmpty())
+	if lid.IsEmpty() {
+		cli.Log.Warnf("[PairSuccess] No LID provided in pair-success node for JID: %s", jid)
+	}
+
 	go func() {
 		err := cli.handlePair(ctx, deviceIdentityBytes, id, businessName, platform, jid, lid)
 		if err != nil {
@@ -176,6 +181,11 @@ func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, r
 	if err != nil {
 		cli.sendPairError(ctx, reqID, 500, "internal-error")
 		return &PairDatabaseError{"failed to save device store", err}
+	}
+	if !lid.IsEmpty() {
+		cli.Log.Infof("[PairSuccess] Saved LID from server: %s (JID: %s)", lid, jid)
+	} else {
+		cli.Log.Warnf("[PairSuccess] Saved pair success but LID is empty (JID: %s)", jid)
 	}
 	cli.StoreLIDPNMapping(ctx, lid, jid)
 	err = cli.Store.Identities.PutIdentity(ctx, mainDeviceLID.SignalAddress().String(), mainDeviceIdentity)

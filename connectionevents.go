@@ -161,18 +161,44 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 	cli.AutoReconnectErrors = 0
 	cli.isLoggedIn.Store(true)
 	nodeLID := node.AttrGetter().JID("lid")
+	cli.Log.Debugf("[ConnectSuccess] Server provided LID in connect success node: %s (empty=%v)", nodeLID, nodeLID.IsEmpty())
 	if !cli.Store.LID.IsEmpty() && !nodeLID.IsEmpty() && cli.Store.LID != nodeLID {
 		// This should probably never happen, but check just in case.
-		cli.Log.Warnf("Stored LID doesn't match one in connect success: %s != %s", cli.Store.LID, nodeLID)
+		cli.Log.Warnf("[ConnectSuccess] Stored LID doesn't match one in connect success: %s != %s", cli.Store.LID, nodeLID)
 		cli.Store.LID = types.EmptyJID
 	}
 	if cli.Store.LID.IsEmpty() && !nodeLID.IsEmpty() {
 		cli.Store.LID = nodeLID
 		err := cli.Store.Save(ctx)
 		if err != nil {
-			cli.Log.Warnf("Failed to save device after updating LID: %v", err)
+			cli.Log.Warnf("[ConnectSuccess] Failed to save device after updating LID: %v", err)
 		} else {
-			cli.Log.Infof("Updated LID to %s", cli.Store.LID)
+			cli.Log.Infof("[ConnectSuccess] Updated LID from server node: %s", cli.Store.LID)
+		}
+	} else if cli.Store.LID.IsEmpty() && nodeLID.IsEmpty() {
+		cli.Log.Debugf("[ConnectSuccess] No LID provided in connect success node (nodeLID is empty)")
+	}
+	// If account is migrated but LID is still empty, query it proactively
+	if cli.Store.LIDMigrationTimestamp > 0 && cli.Store.LID.IsEmpty() {
+		ownJID := cli.Store.GetJID()
+		if !ownJID.IsEmpty() {
+			cli.Log.Infof("[ConnectSuccess] Account migrated (lid_migration_ts=%d) but own LID is empty, querying LID for %s using GetLIDOnly", cli.Store.LIDMigrationTimestamp, ownJID)
+			lidMap, err := cli.GetLIDOnly(ctx, []types.JID{ownJID})
+			if err == nil && !lidMap[ownJID].IsEmpty() {
+				cli.Store.LID = lidMap[ownJID]
+				err = cli.Store.Save(ctx)
+				if err != nil {
+					cli.Log.Warnf("[ConnectSuccess] Failed to save own LID after query: %v", err)
+				} else {
+					cli.Log.Infof("[ConnectSuccess] Successfully queried and saved own LID: %s (using GetLIDOnly query+message mode)", cli.Store.LID)
+				}
+			} else if err != nil {
+				cli.Log.Warnf("[ConnectSuccess] GetLIDOnly failed to query own LID for %s: %v", ownJID, err)
+			} else {
+				cli.Log.Warnf("[ConnectSuccess] GetLIDOnly succeeded but own LID not found in server response for %s", ownJID)
+			}
+		} else {
+			cli.Log.Warnf("[ConnectSuccess] Cannot query own LID: own JID is empty")
 		}
 	}
 	// Some users are missing their own LID-PN mapping even though it's already in the device table,

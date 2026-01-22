@@ -250,6 +250,79 @@ func (cli *Client) GetUserInfo(ctx context.Context, jids []types.JID) (map[types
 	return respData, nil
 }
 
+// GetLIDOnly queries only LID information for the given JIDs using lightweight usync query.
+// This avoids triggering background full mode which requests extensive user data.
+// Returns a map of PN JID to LID JID. Empty LIDs are not included in the result.
+func (cli *Client) GetLIDOnly(ctx context.Context, jids []types.JID) (map[types.JID]types.JID, error) {
+	if cli == nil {
+		return nil, ErrClientIsNil
+	}
+	if len(jids) == 0 {
+		return make(map[types.JID]types.JID), nil
+	}
+
+	cli.Log.Debugf("[GetLIDOnly] Starting LID query for %d JID(s) using query+message mode", len(jids))
+	for i, jid := range jids {
+		if i < 3 || i == len(jids)-1 {
+			cli.Log.Debugf("[GetLIDOnly] Querying LID for: %s", jid)
+		} else if i == 3 {
+			cli.Log.Debugf("[GetLIDOnly] ... and %d more JID(s)", len(jids)-3)
+		}
+	}
+
+	// Use query mode with message context to avoid background full mode
+	list, err := cli.usync(ctx, jids, "query", "message", []waBinary.Node{
+		{Tag: "lid"},
+	})
+	if err != nil {
+		cli.Log.Warnf("[GetLIDOnly] usync query failed (mode=query, context=message): %v", err)
+		return nil, fmt.Errorf("failed to query LID via usync: %w", err)
+	}
+
+	cli.Log.Debugf("[GetLIDOnly] usync query succeeded, parsing response")
+	result := make(map[types.JID]types.JID, len(jids))
+	mappings := make([]store.LIDMapping, 0, len(jids))
+	userCount := 0
+	lidFoundCount := 0
+
+	for _, child := range list.GetChildren() {
+		jid, jidOK := child.Attrs["jid"].(types.JID)
+		if child.Tag != "user" || !jidOK {
+			continue
+		}
+		userCount++
+
+		lidTag := child.GetChildByTag("lid")
+		lid := lidTag.AttrGetter().OptionalJIDOrEmpty("val")
+
+		if !lid.IsEmpty() {
+			result[jid] = lid
+			mappings = append(mappings, store.LIDMapping{PN: jid, LID: lid})
+			lidFoundCount++
+			cli.Log.Debugf("[GetLIDOnly] Found LID for %s -> %s", jid, lid)
+		} else {
+			cli.Log.Debugf("[GetLIDOnly] No LID found for %s in server response", jid)
+		}
+	}
+
+	cli.Log.Infof("[GetLIDOnly] Query completed: %d user(s) in response, %d LID(s) found, %d LID(s) requested", userCount, lidFoundCount, len(jids))
+
+	// Save mappings to cache for future use
+	if len(mappings) > 0 {
+		err = cli.Store.LIDs.PutManyLIDMappings(ctx, mappings)
+		if err != nil {
+			// Log error but don't fail the operation
+			cli.Log.Warnf("[GetLIDOnly] Failed to cache LID mappings: %v", err)
+		} else {
+			cli.Log.Debugf("[GetLIDOnly] Successfully cached %d LID mapping(s)", len(mappings))
+		}
+	} else {
+		cli.Log.Debugf("[GetLIDOnly] No LID mappings to cache")
+	}
+
+	return result, nil
+}
+
 func (cli *Client) GetBotListV2(ctx context.Context) ([]types.BotListInfo, error) {
 	resp, err := cli.sendIQ(ctx, infoQuery{
 		To:        types.ServerJID,

@@ -330,9 +330,9 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 			fp = fingerprint.GenerateFingerprint(regionCode)
 			// 记录日志：生成新指纹（只记录一次）
 			if cli.Log != nil {
-				cli.Log.Infof("Generated new fingerprint for %s (region: %s): %s %s (%s %s), MCC: %s, Language: %s",
+				cli.Log.Infof("Generated new fingerprint for %s (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
 					jid.User, regionCode, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
-					fp.Mcc, fp.LocaleLanguage)
+					fp.Mcc, fp.Mnc, fp.LocaleLanguage)
 			}
 			go func() {
 				_ = container.PutFingerprint(context.Background(), jid, fp)
