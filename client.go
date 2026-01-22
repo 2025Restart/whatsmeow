@@ -746,6 +746,9 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 		//fs.HTTPHeaders.Set("Sec-Fetch-Dest", "empty")
 		//fs.HTTPHeaders.Set("Sec-Fetch-Mode", "websocket")
 		//fs.HTTPHeaders.Set("Sec-Fetch-Site", "cross-site")
+	} else {
+		// 为 WhatsApp WebSocket 连接设置完整的浏览器头
+		cli.setWebSocketHeaders(fs.HTTPHeaders)
 	}
 	if err := fs.Connect(ctx); err != nil {
 		fs.Close(0)

@@ -362,12 +362,14 @@ func (cli *Client) doMediaDownloadRequest(ctx context.Context, url string) (*htt
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare request: %w", err)
 	}
-	req.Header.Set("Origin", socket.Origin)
-	req.Header.Set("Referer", socket.Origin+"/")
 	if cli.MessengerConfig != nil {
 		req.Header.Set("User-Agent", cli.MessengerConfig.UserAgent)
+		req.Header.Set("Origin", socket.Origin)
+		req.Header.Set("Referer", socket.Origin+"/")
+	} else {
+		// 设置完整的浏览器头
+		cli.setBrowserHeaders(req, false)
 	}
-	// TODO user agent for whatsapp downloads?
 	resp, err := cli.mediaHTTP.Do(req)
 	if err != nil {
 		return nil, err

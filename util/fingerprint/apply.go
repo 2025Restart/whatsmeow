@@ -144,19 +144,26 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 			if existingProps.HistorySyncConfig != nil {
 				deviceProps.HistorySyncConfig = existingProps.HistorySyncConfig
 			} else {
-				// 使用默认值
+				// 使用默认值（与 store/clientpayload.go 保持一致）
 				deviceProps.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{
-					StorageQuotaMb:                           proto.Uint32(10240),
-					InlineInitialPayloadInE2EeMsg:            proto.Bool(true),
-					SupportCallLogHistory:                    proto.Bool(false),
-					SupportBotUserAgentChatHistory:           proto.Bool(true),
-					SupportCagReactionsAndPolls:              proto.Bool(true),
-					SupportBizHostedMsg:                      proto.Bool(true),
+					StorageQuotaMb:                proto.Uint32(10240),
+					InlineInitialPayloadInE2EeMsg: proto.Bool(true),
+					RecentSyncDaysLimit:           nil,
+					// 不需要的功能默认关闭，最小化特征
+					SupportCallLogHistory:                    proto.Bool(true),
+					SupportBotUserAgentChatHistory:           proto.Bool(false),
+					SupportCagReactionsAndPolls:              proto.Bool(false),
+					SupportBizHostedMsg:                      proto.Bool(false),
 					SupportRecentSyncChunkMessageCountTuning: proto.Bool(true),
-					SupportHostedGroupMsg:                    proto.Bool(true),
-					SupportFbidBotChatHistory:                proto.Bool(true),
-					SupportMessageAssociation:                proto.Bool(true),
+					SupportHostedGroupMsg:                    proto.Bool(false),
+					SupportFbidBotChatHistory:                proto.Bool(false),
+					SupportAddOnHistorySyncMigration:         nil,
+					SupportMessageAssociation:                proto.Bool(false),
 					SupportGroupHistory:                      proto.Bool(false),
+					OnDemandReady:                            nil,
+					SupportGuestChat:                         nil,
+					CompleteOnDemandReady:                    nil,
+					ThumbnailSyncDaysLimit:                   nil,
 				}
 			}
 			if existingProps.RequireFullSync != nil {

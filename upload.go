@@ -21,7 +21,6 @@ import (
 
 	"go.mau.fi/util/random"
 
-	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/util/cbcutil"
 )
 
@@ -104,7 +103,7 @@ func (cli *Client) UploadReader(ctx context.Context, plaintext io.Reader, tempFi
 	resp.MediaKey = random.Bytes(32)
 	iv, cipherKey, macKey, _ := getMediaKeys(resp.MediaKey, appInfo)
 	if tempFile == nil {
-		tempFile, err = os.CreateTemp("", "whatsmeow-upload-*")
+		tempFile, err = os.CreateTemp("", "")
 		if err != nil {
 			err = fmt.Errorf("failed to create temporary file: %w", err)
 			return
@@ -233,8 +232,8 @@ func (cli *Client) rawUpload(ctx context.Context, dataToUpload io.Reader, upload
 	}
 
 	req.ContentLength = int64(uploadSize)
-	req.Header.Set("Origin", socket.Origin)
-	req.Header.Set("Referer", socket.Origin+"/")
+	// 设置完整的浏览器头
+	cli.setBrowserHeaders(req, false)
 
 	httpResp, err := cli.mediaHTTP.Do(req)
 	if err != nil {

@@ -153,18 +153,19 @@ var DeviceProps = &waCompanionReg.DeviceProps{
 		Tertiary:  proto.Uint32(0),
 	},
 	HistorySyncConfig: &waCompanionReg.DeviceProps_HistorySyncConfig{
-		StorageQuotaMb:                           proto.Uint32(10240),
-		InlineInitialPayloadInE2EeMsg:            proto.Bool(true),
-		RecentSyncDaysLimit:                      nil,
-		SupportCallLogHistory:                    proto.Bool(false),
-		SupportBotUserAgentChatHistory:           proto.Bool(true),
-		SupportCagReactionsAndPolls:              proto.Bool(true),
-		SupportBizHostedMsg:                      proto.Bool(true),
+		StorageQuotaMb:                proto.Uint32(10240),
+		InlineInitialPayloadInE2EeMsg: proto.Bool(true),
+		RecentSyncDaysLimit:           nil,
+		// 不需要的功能默认关闭，最小化特征
+		SupportCallLogHistory:                    proto.Bool(true),
+		SupportBotUserAgentChatHistory:           proto.Bool(false),
+		SupportCagReactionsAndPolls:              proto.Bool(false),
+		SupportBizHostedMsg:                      proto.Bool(false),
 		SupportRecentSyncChunkMessageCountTuning: proto.Bool(true),
-		SupportHostedGroupMsg:                    proto.Bool(true),
-		SupportFbidBotChatHistory:                proto.Bool(true),
+		SupportHostedGroupMsg:                    proto.Bool(false),
+		SupportFbidBotChatHistory:                proto.Bool(false),
 		SupportAddOnHistorySyncMigration:         nil,
-		SupportMessageAssociation:                proto.Bool(true),
+		SupportMessageAssociation:                proto.Bool(false),
 		SupportGroupHistory:                      proto.Bool(false),
 		OnDemandReady:                            nil,
 		SupportGuestChat:                         nil,
@@ -187,8 +188,6 @@ func SetOSInfo(name string, version [3]uint32) {
 func (device *Device) getHistorySyncProps() *waCompanionReg.DeviceProps {
 	props := proto.Clone(DeviceProps).(*waCompanionReg.DeviceProps)
 
-	// 如果 DeviceProps.Version 还是默认的 0.1.0，同步为当前的 waVersion
-	// 这解决了用户提到的“底层有 GetLatestVersion 能同步 version”但 Props 未同步的问题
 	if props.Version != nil && props.Version.GetPrimary() == 0 && props.Version.GetSecondary() == 1 {
 		props.Version = &waCompanionReg.DeviceProps_AppVersion{
 			Primary:   proto.Uint32(waVersion[0]),
@@ -246,6 +245,33 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 	}
 	payload.Passive = proto.Bool(false)
 	payload.Pull = proto.Bool(false)
+
+	// 随机化 ConnectReason（基于设备ID的幂等随机）
+	// 注册时主要使用 USER_ACTIVATED，但也可以使用其他合理值
+	var seed int64
+	if device.ID != nil {
+		seed = int64(device.ID.UserInt())
+	} else {
+		seed = int64(device.RegistrationID)
+	}
+	r := rand.New(rand.NewSource(seed + 1000)) // 使用不同的偏移量避免与HistorySyncConfig冲突
+	// USER_ACTIVATED 占70%，PUSH 占20%，其他占10%
+	reasonRand := r.Intn(100)
+	if reasonRand < 70 {
+		payload.ConnectReason = waWa6.ClientPayload_USER_ACTIVATED.Enum()
+	} else if reasonRand < 90 {
+		payload.ConnectReason = waWa6.ClientPayload_PUSH.Enum()
+	} else {
+		// 其他合理值：SCHEDULED, ERROR_RECONNECT, NETWORK_SWITCH, PING_RECONNECT
+		reasons := []waWa6.ClientPayload_ConnectReason{
+			waWa6.ClientPayload_SCHEDULED,
+			waWa6.ClientPayload_ERROR_RECONNECT,
+			waWa6.ClientPayload_NETWORK_SWITCH,
+			waWa6.ClientPayload_PING_RECONNECT,
+		}
+		payload.ConnectReason = reasons[r.Intn(len(reasons))].Enum()
+	}
+
 	return sanitizeClientPayload(payload)
 }
 
@@ -256,6 +282,27 @@ func (device *Device) getLoginPayload() *waWa6.ClientPayload {
 	payload.Passive = proto.Bool(true)
 	payload.Pull = proto.Bool(true)
 	payload.LidDbMigrated = proto.Bool(true)
+
+	// 随机化 ConnectReason（基于设备ID的幂等随机）
+	// 登录时主要使用 USER_ACTIVATED 或 PUSH，但也可以使用其他合理值
+	r := rand.New(rand.NewSource(int64(device.ID.UserInt()) + 2000)) // 使用不同的偏移量
+	// USER_ACTIVATED 占60%，PUSH 占30%，其他占10%
+	reasonRand := r.Intn(100)
+	if reasonRand < 60 {
+		payload.ConnectReason = waWa6.ClientPayload_USER_ACTIVATED.Enum()
+	} else if reasonRand < 90 {
+		payload.ConnectReason = waWa6.ClientPayload_PUSH.Enum()
+	} else {
+		// 其他合理值：SCHEDULED, ERROR_RECONNECT, NETWORK_SWITCH, PING_RECONNECT
+		reasons := []waWa6.ClientPayload_ConnectReason{
+			waWa6.ClientPayload_SCHEDULED,
+			waWa6.ClientPayload_ERROR_RECONNECT,
+			waWa6.ClientPayload_NETWORK_SWITCH,
+			waWa6.ClientPayload_PING_RECONNECT,
+		}
+		payload.ConnectReason = reasons[r.Intn(len(reasons))].Enum()
+	}
+
 	return sanitizeClientPayload(payload)
 }
 
