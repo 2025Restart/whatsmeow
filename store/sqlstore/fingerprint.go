@@ -163,3 +163,16 @@ func (c *Container) PutFingerprint(ctx context.Context, jid types.JID, fp *store
 	}
 	return nil
 }
+
+// DeleteFingerprint 删除设备指纹
+func (c *Container) DeleteFingerprint(ctx context.Context, jid types.JID) error {
+	const deleteFingerprintQuery = `DELETE FROM whatsmeow_device_fingerprint WHERE jid=$1`
+	_, err := c.db.Exec(ctx, deleteFingerprintQuery, jid.String())
+	if err != nil {
+		return fmt.Errorf("failed to delete fingerprint: %w", err)
+	}
+	if c.log != nil {
+		c.log.Infof("Deleted fingerprint for %s", jid.User)
+	}
+	return nil
+}

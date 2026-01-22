@@ -20,6 +20,8 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"go.mau.fi/whatsmeow/util/keys"
@@ -188,6 +190,73 @@ func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, r
 		cli.Log.Warnf("[PairSuccess] Saved pair success but LID is empty (JID: %s)", jid)
 	}
 	cli.StoreLIDPNMapping(ctx, lid, jid)
+
+	// 保存临时指纹到数据库（如果存在）
+	// 优先从电话号码 JID 读取临时指纹，如果没有则使用内存中的临时指纹
+	if container, ok := cli.Store.Container.(*sqlstore.Container); ok {
+		var tempJID types.JID
+		if cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
+			tempJID = cli.phoneLinkingCache.jid
+		}
+
+		if cli.Log != nil {
+			cli.Log.Infof("[Fingerprint] Pair success: migrating temporary fingerprint to JID %s", jid.User)
+		}
+
+		// 尝试从电话号码 JID 读取临时指纹
+		var pendingFP *store.DeviceFingerprint
+		if !tempJID.IsEmpty() {
+			var err error
+			if cli.Log != nil {
+				cli.Log.Infof("[Fingerprint] Pair success: attempting to load temporary fingerprint from phone JID %s", tempJID.User)
+			}
+			pendingFP, err = container.GetFingerprint(context.Background(), tempJID)
+			if err != nil {
+				cli.Log.Warnf("[Fingerprint] Failed to get temporary fingerprint from %s: %v", tempJID.User, err)
+			} else if pendingFP != nil {
+				if cli.Log != nil {
+					cli.Log.Infof("[Fingerprint] Found temporary fingerprint from phone JID %s", tempJID.User)
+				}
+			}
+		}
+
+		// 如果数据库中没有，尝试使用内存中的临时指纹
+		if pendingFP == nil {
+			cli.pendingFingerprintLock.Lock()
+			if cli.pendingFingerprint != nil {
+				pendingFP = cli.pendingFingerprint
+				cli.pendingFingerprintLock.Unlock()
+				if cli.Log != nil {
+					cli.Log.Infof("[Fingerprint] Using pending fingerprint from memory (not found in database)")
+				}
+			} else {
+				cli.pendingFingerprintLock.Unlock()
+				if cli.Log != nil {
+					cli.Log.Warnf("[Fingerprint] No pending fingerprint found (neither in database nor memory)")
+				}
+			}
+		}
+
+		// 保存临时指纹到实际的 JID
+		if pendingFP != nil {
+			if cli.Log != nil {
+				cli.Log.Infof("[Fingerprint] Migrating fingerprint to JID %s (fingerprint: %s %s, MCC: %s, MNC: %s)",
+					jid.User, pendingFP.Manufacturer, pendingFP.Device, pendingFP.Mcc, pendingFP.Mnc)
+			}
+			go func() {
+				if saveErr := container.PutFingerprint(context.Background(), jid, pendingFP); saveErr != nil {
+					cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint after pairing for %s: %v", jid.User, saveErr)
+				} else {
+					cli.Log.Infof("[Fingerprint] Successfully migrated temporary fingerprint to JID %s after pairing", jid.User)
+					// 清除内存中的临时指纹
+					cli.pendingFingerprintLock.Lock()
+					cli.pendingFingerprint = nil
+					cli.pendingFingerprintSaved.Store(false)
+					cli.pendingFingerprintLock.Unlock()
+				}
+			}()
+		}
+	}
 	err = cli.Store.Identities.PutIdentity(ctx, mainDeviceLID.SignalAddress().String(), mainDeviceIdentity)
 	if err != nil {
 		_ = cli.Store.Delete(ctx)
