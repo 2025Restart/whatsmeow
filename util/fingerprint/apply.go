@@ -107,21 +107,39 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 			if fp.Mcc == "" || !strings.HasPrefix(fp.Mcc, "40") {
 				payload.UserAgent.Mcc = proto.String("404")
 				payload.UserAgent.Mnc = proto.String("01")
+			} else if fp.Mcc != "" {
+				// 如果指纹中有有效的 MCC（以 40 开头），直接应用
+				payload.UserAgent.Mcc = proto.String(fp.Mcc)
+				if fp.Mnc != "" {
+					payload.UserAgent.Mnc = proto.String(fp.Mnc)
+				} else {
+					payload.UserAgent.Mnc = proto.String("01")
+				}
 			}
 		case "BR":
 			// 巴西：确保 MCC 为 724
 			if fp.Mcc == "" || fp.Mcc != "724" {
 				payload.UserAgent.Mcc = proto.String("724")
 				payload.UserAgent.Mnc = proto.String("02")
+			} else if fp.Mcc == "724" {
+				// 如果指纹中的 MCC 正确，应用指纹的 MNC
+				payload.UserAgent.Mcc = proto.String(fp.Mcc)
+				if fp.Mnc != "" {
+					payload.UserAgent.Mnc = proto.String(fp.Mnc)
+				} else {
+					payload.UserAgent.Mnc = proto.String("02")
+				}
 			}
 		}
 	}
 
-	// 如果上面开关没命中，但指纹里有 MCC，则应用指纹的
-	if payload.UserAgent.Mcc == nil && fp.Mcc != "" {
+	// 如果上面开关没命中，但指纹里有 MCC，则应用指纹的（覆盖已设置的值）
+	// 注意：对于 IN/BR 国家，如果上面 switch 已经处理了，这里不会再次设置
+	// 对于其他国家，或者上面 switch 未处理的情况，直接应用指纹的 MCC/MNC
+	if fp.Mcc != "" && (fp.LocaleCountry == "" || (fp.LocaleCountry != "IN" && fp.LocaleCountry != "BR")) {
 		payload.UserAgent.Mcc = proto.String(fp.Mcc)
 	}
-	if payload.UserAgent.Mnc == nil && fp.Mnc != "" {
+	if fp.Mnc != "" && (fp.LocaleCountry == "" || (fp.LocaleCountry != "IN" && fp.LocaleCountry != "BR")) {
 		payload.UserAgent.Mnc = proto.String(fp.Mnc)
 	}
 
