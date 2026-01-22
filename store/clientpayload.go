@@ -128,15 +128,16 @@ var BaseClientPayload = &waWa6.ClientPayload{
 		Platform:       waWa6.ClientPayload_UserAgent_WEB.Enum(),
 		ReleaseChannel: waWa6.ClientPayload_UserAgent_RELEASE.Enum(),
 		AppVersion:     waVersion.ProtoAppVersion(),
-		Mcc:            proto.String("000"),
-		Mnc:            proto.String("000"),
-		OsVersion:      proto.String("0.1"),
-		Manufacturer:   proto.String("Microsoft"),
-		Device:         proto.String("Desktop"),
-		OsBuildNumber:  proto.String("0.1"),
+		// ⚠️ 不再提供硬编码的默认 MCC/MNC，强制要求指纹模块填充
+		Mcc:           nil,
+		Mnc:           nil,
+		OsVersion:     nil,
+		Manufacturer:  proto.String("Unknown"),
+		Device:        proto.String("Desktop"),
+		OsBuildNumber: nil,
 
-		LocaleLanguageIso6391:       proto.String("en"),
-		LocaleCountryIso31661Alpha2: proto.String("US"),
+		LocaleLanguageIso6391:       nil,
+		LocaleCountryIso31661Alpha2: nil,
 	},
 	WebInfo: &waWa6.ClientPayload_WebInfo{
 		WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum(),
@@ -313,11 +314,28 @@ func sanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 	}
 	// L5: 彻底禁止 whatsmeow 特征泄露
 	if payload.UserAgent != nil {
-		if payload.UserAgent.Manufacturer != nil && *payload.UserAgent.Manufacturer == "whatsmeow" {
+		if payload.UserAgent.Manufacturer != nil && (*payload.UserAgent.Manufacturer == "whatsmeow" || *payload.UserAgent.Manufacturer == "Unknown") {
 			payload.UserAgent.Manufacturer = proto.String("Microsoft")
 		}
 		if payload.UserAgent.Device != nil && *payload.UserAgent.Device == "whatsmeow" {
 			payload.UserAgent.Device = proto.String("Desktop")
+		}
+
+		// 最终安全网：确保必填字段不为 nil
+		if payload.UserAgent.Mcc == nil {
+			payload.UserAgent.Mcc = proto.String("404") // 降级到印度默认
+		}
+		if payload.UserAgent.Mnc == nil {
+			payload.UserAgent.Mnc = proto.String("01")
+		}
+		if payload.UserAgent.OsVersion == nil {
+			payload.UserAgent.OsVersion = proto.String("10.0.0")
+		}
+		if payload.UserAgent.LocaleLanguageIso6391 == nil {
+			payload.UserAgent.LocaleLanguageIso6391 = proto.String("en")
+		}
+		if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
+			payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
 		}
 	}
 	return payload

@@ -18,7 +18,8 @@ func init() {
 		Name: "Brazil",
 
 		Languages: []fingerprint.LanguageConfig{
-			{Code: "pt", Weight: 1.0, Countries: []string{"BR"}}, // 葡萄牙语 100%
+			{Code: "pt", Weight: 0.85, Countries: []string{"BR"}}, // 葡萄牙语 85%
+			{Code: "en", Weight: 0.15, Countries: []string{"BR"}}, // 英语 15%
 		},
 
 		DeviceDistribution: []fingerprint.PlatformDistribution{

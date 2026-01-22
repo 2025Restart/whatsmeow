@@ -16,6 +16,15 @@ import (
 	"go.mau.fi/whatsmeow/store"
 )
 
+// GetRegionByPhone 根据手机号前缀识别地区
+func GetRegionByPhone(phone string) string {
+	info := LookupPhoneRegion(phone)
+	if info != nil {
+		return info.RegionCode
+	}
+	return ""
+}
+
 // ApplyFingerprint 应用设备指纹到 ClientPayload
 func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint) {
 	if payload == nil {
@@ -42,16 +51,8 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 					// 默认使用 CHROME 以显示图标
 					existingProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 				}
-				// PC 浏览器特征：强制清理可能导致风控的移动端残留字段
-				if payload.UserAgent != nil && (payload.WebInfo != nil || existingProps.GetPlatformType() == waCompanionReg.DeviceProps_CHROME) {
-					// 官方 Web 通常不发送具体的 MCC/MNC，设为 000
-					payload.UserAgent.Mcc = proto.String("000")
-					payload.UserAgent.Mnc = proto.String("000")
-					// L2: 强制对齐平台类型
-					payload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
-					// 强制设置桌面类型
-					payload.UserAgent.Device = proto.String("Desktop")
-				}
+
+				// 深度清理特征逻辑移至下方统一处理
 				devicePropsBytes, _ := proto.Marshal(&existingProps)
 				payload.DevicePairingData.DeviceProps = devicePropsBytes
 			}
@@ -68,7 +69,7 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 		payload.UserAgent = &waWa6.ClientPayload_UserAgent{}
 	}
 
-	// 应用 UserAgent 字段
+	// 1. 应用基础设备字段
 	if fp.Manufacturer != "" {
 		payload.UserAgent.Manufacturer = proto.String(fp.Manufacturer)
 	}
@@ -81,23 +82,6 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 	if fp.OsVersion != "" {
 		payload.UserAgent.OsVersion = proto.String(fp.OsVersion)
 	}
-	if fp.OsBuildNumber != "" {
-		payload.UserAgent.OsBuildNumber = proto.String(fp.OsBuildNumber)
-	}
-	// 强制应用 MCC/MNC（即使为空也要覆盖默认值 "000"）
-	if fp.Mcc != "" {
-		payload.UserAgent.Mcc = proto.String(fp.Mcc)
-	}
-	if fp.Mnc != "" {
-		payload.UserAgent.Mnc = proto.String(fp.Mnc)
-	}
-	// 强制应用语言和国家（即使为空也要覆盖默认值）
-	if fp.LocaleLanguage != "" {
-		payload.UserAgent.LocaleLanguageIso6391 = proto.String(fp.LocaleLanguage)
-	}
-	if fp.LocaleCountry != "" {
-		payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(fp.LocaleCountry)
-	}
 	if fp.Platform != nil {
 		payload.UserAgent.Platform = fp.Platform
 	}
@@ -107,11 +91,71 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 	if fp.DeviceType != nil {
 		payload.UserAgent.DeviceType = fp.DeviceType
 	}
-	if fp.DeviceBoard != "" {
-		payload.UserAgent.DeviceBoard = proto.String(fp.DeviceBoard)
+
+	// 2. 强制地区特征对齐 (IN/BR 专项)
+	if fp.LocaleLanguage != "" {
+		payload.UserAgent.LocaleLanguageIso6391 = proto.String(fp.LocaleLanguage)
+	}
+	if fp.LocaleCountry != "" {
+		payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(fp.LocaleCountry)
+
+		// 针对特定国家强制修正 MCC/MNC，解决 odn 报错
+		countryCode := fp.LocaleCountry
+		switch countryCode {
+		case "IN":
+			// 印度：确保 MCC 为 404 或 405
+			if fp.Mcc == "" || !strings.HasPrefix(fp.Mcc, "40") {
+				payload.UserAgent.Mcc = proto.String("404")
+				payload.UserAgent.Mnc = proto.String("01")
+			}
+		case "BR":
+			// 巴西：确保 MCC 为 724
+			if fp.Mcc == "" || fp.Mcc != "724" {
+				payload.UserAgent.Mcc = proto.String("724")
+				payload.UserAgent.Mnc = proto.String("02")
+			}
+		}
 	}
 
-	// 应用 DeviceProps（在 DevicePairingData 中）
+	// 如果上面开关没命中，但指纹里有 MCC，则应用指纹的
+	if payload.UserAgent.Mcc == nil && fp.Mcc != "" {
+		payload.UserAgent.Mcc = proto.String(fp.Mcc)
+	}
+	if payload.UserAgent.Mnc == nil && fp.Mnc != "" {
+		payload.UserAgent.Mnc = proto.String(fp.Mnc)
+	}
+
+	// 3. WEB 平台特征深度清洗 (解决 vll 报错)
+	isWeb := payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB
+	if isWeb {
+		// 强制清理移动端残留字段
+		payload.UserAgent.OsBuildNumber = nil
+		payload.UserAgent.DeviceBoard = nil
+
+		// 强制对齐桌面特征
+		payload.UserAgent.Device = proto.String("Desktop")
+
+		// 针对 Windows/macOS 强制设置通用制造商
+		osName := ""
+		if fp.DevicePropsOs != "" {
+			osName = strings.ToLower(fp.DevicePropsOs)
+		}
+		if strings.Contains(osName, "windows") {
+			payload.UserAgent.Manufacturer = proto.String("Microsoft")
+		} else if strings.Contains(osName, "mac") {
+			payload.UserAgent.Manufacturer = proto.String("Apple")
+		}
+	} else {
+		// 非 WEB 平台保留原有逻辑
+		if fp.OsBuildNumber != "" {
+			payload.UserAgent.OsBuildNumber = proto.String(fp.OsBuildNumber)
+		}
+		if fp.DeviceBoard != "" {
+			payload.UserAgent.DeviceBoard = proto.String(fp.DeviceBoard)
+		}
+	}
+
+	// 4. 应用 DeviceProps（在 DevicePairingData 中）
 	// 注意：需要合并，不能完全替换，保留其他重要字段
 	if fp.DevicePropsOs != "" {
 		// 如果 DevicePairingData 不存在，在注册时会创建

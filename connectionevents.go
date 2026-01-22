@@ -103,6 +103,7 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 	ag := node.AttrGetter()
 	reason := events.ConnectFailureReason(ag.Int("reason"))
 	message := ag.OptionalString("message")
+	location := ag.OptionalString("location")
 	willAutoReconnect := true
 	switch {
 	default:
@@ -118,20 +119,21 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 	}
 	if reason == 403 {
 		cli.Log.Debugf(
-			"Message for 403 connect failure: %s / %s",
+			"Message for 403 connect failure: %s / %s (location: %s)",
 			ag.OptionalString("logout_message_header"),
 			ag.OptionalString("logout_message_subtext"),
+			location,
 		)
 	}
 	if reason.IsLoggedOut() {
-		cli.Log.Infof("Got %s connect failure, sending LoggedOut event and deleting session", reason)
+		cli.Log.Infof("Got %s connect failure (location: %s), sending LoggedOut event and deleting session", reason, location)
 		go cli.dispatchEvent(&events.LoggedOut{OnConnect: true, Reason: reason})
 		err := cli.Store.Delete(ctx)
 		if err != nil {
 			cli.Log.Warnf("Failed to delete store after %d failure: %v", int(reason), err)
 		}
 	} else if reason == events.ConnectFailureTempBanned {
-		cli.Log.Warnf("Temporary ban connect failure: %s", node.XMLString())
+		cli.Log.Warnf("Temporary ban connect failure (location: %s): %s", location, node.XMLString())
 		go cli.dispatchEvent(&events.TemporaryBan{
 			Code:   events.TempBanReason(ag.Int("code")),
 			Expire: time.Duration(ag.Int("expire")) * time.Second,
@@ -148,9 +150,9 @@ func (cli *Client) handleConnectFailure(ctx context.Context, node *waBinary.Node
 			go cli.dispatchEvent(&events.CATRefreshError{Error: err})
 		}
 	} else if willAutoReconnect {
-		cli.Log.Warnf("Got %d/%s connect failure, assuming automatic reconnect will handle it", int(reason), message)
+		cli.Log.Warnf("Got %d/%s connect failure (location: %s), assuming automatic reconnect will handle it", int(reason), message, location)
 	} else {
-		cli.Log.Warnf("Unknown connect failure: %s", node.XMLString())
+		cli.Log.Warnf("Unknown connect failure (location: %s): %s", location, node.XMLString())
 		go cli.dispatchEvent(&events.ConnectFailure{Reason: reason, Message: message, Raw: node})
 	}
 }

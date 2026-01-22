@@ -17,26 +17,42 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 )
 
-// generateUserAgent 根据指纹信息生成浏览器 User-Agent 字符串
+// generateUserAgent 根据 Payload 信息生成浏览器 User-Agent 字符串
+// 优先从 ClientPayload 中提取，确保与握手包 100% 一致
 func (cli *Client) generateUserAgent() string {
-	fp := cli.getFingerprintInfo()
-	
-	// 如果没有指纹信息，使用默认值
-	platformType := fp.PlatformType
-	if platformType == 0 {
-		platformType = waCompanionReg.DeviceProps_CHROME
-	}
-	osName := fp.DevicePropsOs
-	if osName == "" {
-		osName = "Windows"
-	}
-	osVersion := fp.OsVersion
-	if osVersion == "" {
-		osVersion = "10.0.0"
+	payload := cli.Store.GetClientPayload()
+	if payload == nil || payload.UserAgent == nil {
+		// Fallback: 如果没有 Payload，尝试使用指纹
+		fp := cli.getFingerprintInfo()
+		platformType := fp.PlatformType
+		if platformType == 0 {
+			platformType = waCompanionReg.DeviceProps_CHROME
+		}
+		osName := fp.DevicePropsOs
+		if osName == "" {
+			osName = "Windows"
+		}
+		osVersion := fp.OsVersion
+		if osVersion == "" {
+			osVersion = "10.0.0"
+		}
+		return generateBrowserUserAgent(platformType, osName, osVersion)
 	}
 
-	// 根据平台类型生成 User-Agent
-	return generateBrowserUserAgent(platformType, osName, osVersion)
+	// 核心：从 Payload 提取字段
+	ua := payload.UserAgent
+	osName := "Windows" // 默认
+	if ua.GetManufacturer() == "Apple" {
+		osName = "macOS"
+	}
+	
+	// 从 PlatformType 推断
+	platformType := waCompanionReg.DeviceProps_CHROME
+	if payload.WebInfo != nil {
+		// TODO: WebSubPlatform 映射到 DeviceProps_PlatformType
+	}
+	
+	return generateBrowserUserAgent(platformType, osName, ua.GetOsVersion())
 }
 
 // fingerprintInfo 指纹信息结构
@@ -233,23 +249,20 @@ func (cli *Client) generateAcceptLanguage() string {
 	
 	// 根据语言和国家生成 Accept-Language
 	// 格式：en-US,en;q=0.9 或 hi-IN,hi;q=0.9,en;q=0.8
-	primary := fmt.Sprintf("%s-%s", lang, country)
-	
 	// 根据地区添加次要语言
 	switch country {
 	case "IN":
-		// 印度：主要语言可能是 hi 或 en
-		if lang == "hi" {
-			return fmt.Sprintf("%s,hi;q=0.9,en-IN;q=0.8,en;q=0.7", primary)
-		} else {
-			return fmt.Sprintf("%s,en;q=0.9,hi-IN;q=0.8,hi;q=0.7", primary)
-		}
+		// 印度本地语种：不再包含 en
+		return fmt.Sprintf("%s-IN,%s;q=0.9", lang, lang)
 	case "BR":
-		// 巴西：主要语言是 pt
-		return fmt.Sprintf("%s,pt;q=0.9,en-US;q=0.8,en;q=0.7", primary)
+		// 巴西：包含 pt-BR 和可能的 en-US
+		if lang == "en" {
+			return "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7"
+		}
+		return "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
 	default:
 		// 默认：英语为主
-		return fmt.Sprintf("%s,%s;q=0.9,en;q=0.8", primary, lang)
+		return fmt.Sprintf("%s-%s,%s;q=0.9,en-US;q=0.8,en;q=0.7", lang, country, lang)
 	}
 }
 
@@ -293,4 +306,16 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 	headers.Set("Sec-Fetch-Site", "cross-site")
 	headers.Set("Cache-Control", "no-cache")
 	headers.Set("Pragma", "no-cache")
+
+	// 注入现代浏览器 Client Hints (解决 cln/cco 报错)
+	payload := cli.Store.GetClientPayload()
+	if payload != nil && payload.UserAgent != nil {
+		osName := "Windows"
+		if payload.UserAgent.GetManufacturer() == "Apple" {
+			osName = "macOS"
+		}
+		headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
+		headers.Set("Sec-Ch-Ua-Mobile", "?0") // ⚠️ 强制锁定为 PC 端
+		headers.Set("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+	}
 }

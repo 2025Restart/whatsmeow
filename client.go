@@ -323,6 +323,24 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		payload := deviceStore.GetClientPayload()
 		jid := deviceStore.GetJID()
 
+		// 1. 动态地区匹配：优先根据手机号识别地区 (91->IN, 55->BR)
+		dynamicRegion := regionCode
+		phone := ""
+		if !jid.IsEmpty() {
+			phone = jid.User
+		} else if cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
+			phone = cli.phoneLinkingCache.jid.User
+		}
+
+		if phone != "" {
+			if matchedRegion := fingerprint.GetRegionByPhone(phone); matchedRegion != "" {
+				dynamicRegion = matchedRegion
+				if cli.Log != nil {
+					cli.Log.Debugf("[Fingerprint] Phone %s matched dynamic region: %s (original config: %s)", phone, matchedRegion, regionCode)
+				}
+			}
+		}
+
 		ctx := context.Background()
 		var fp *store.DeviceFingerprint
 		var err error
@@ -363,22 +381,21 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 				cli.pendingFingerprintLock.Lock()
 				if cli.pendingFingerprint == nil {
 					// 生成临时指纹
-					cli.pendingFingerprint = fingerprint.GenerateFingerprint(regionCode)
+					cli.pendingFingerprint = fingerprint.GenerateFingerprint(dynamicRegion)
 					cli.pendingFingerprintSaved.Store(false) // 重置保存标记
 					if cli.Log != nil {
 						cli.Log.Infof("Generated temporary fingerprint for pairing (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
-							regionCode, cli.pendingFingerprint.Manufacturer, cli.pendingFingerprint.Device,
+							dynamicRegion, cli.pendingFingerprint.Manufacturer, cli.pendingFingerprint.Device,
 							cli.pendingFingerprint.DevicePropsOs, cli.pendingFingerprint.OsVersion,
 							cli.pendingFingerprint.Mcc, cli.pendingFingerprint.Mnc, cli.pendingFingerprint.LocaleLanguage)
 					}
 				}
 				fp = cli.pendingFingerprint
-				shouldSave := !cli.pendingFingerprintSaved.Load()
 				cli.pendingFingerprintLock.Unlock()
 
 				// 如果有电话号码 JID，保存临时指纹到数据库（供下次复用）
 				// 使用原子操作避免并发重复保存
-				if !tempJID.IsEmpty() && shouldSave {
+				if !tempJID.IsEmpty() {
 					if cli.pendingFingerprintSaved.CompareAndSwap(false, true) {
 						if cli.Log != nil {
 							cli.Log.Infof("[Fingerprint] Saving temporary fingerprint to database for %s (atomic operation)", tempJID.User)
@@ -472,10 +489,10 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 				} else {
 					cli.pendingFingerprintLock.Unlock()
 					// 生成新指纹
-					fp = fingerprint.GenerateFingerprint(regionCode)
+					fp = fingerprint.GenerateFingerprint(dynamicRegion)
 					if cli.Log != nil {
 						cli.Log.Infof("[Fingerprint] Generated new fingerprint for %s (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
-							jid.User, regionCode, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
+							jid.User, dynamicRegion, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
 							fp.Mcc, fp.Mnc, fp.LocaleLanguage)
 					}
 					go func() {
@@ -504,6 +521,19 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		}
 
 		if fp != nil {
+			// 在应用指纹前，先根据手机号段校准 MCC/MNC (解决 odn 增加的问题)
+			if phoneInfo := fingerprint.LookupPhoneRegion(phone); phoneInfo != nil {
+				// 如果指纹中的 MCC 为空，或者与号段标识的 MCC 不符，执行强制修正
+				if fp.Mcc == "" || fp.Mcc != phoneInfo.MCC || (fp.Mcc == "404" && phoneInfo.MCC == "405") || (fp.Mcc == "405" && phoneInfo.MCC == "404") {
+					if cli.Log != nil && (fp.Mcc != phoneInfo.MCC || fp.Mnc != phoneInfo.MNC) {
+						cli.Log.Debugf("[Fingerprint] Calibrating MCC/MNC for phone %s: %s-%s -> %s-%s (%s)",
+							phone, fp.Mcc, fp.Mnc, phoneInfo.MCC, phoneInfo.MNC, phoneInfo.OperatorName)
+					}
+					fp.Mcc = phoneInfo.MCC
+					fp.Mnc = phoneInfo.MNC
+				}
+			}
+			
 			fingerprint.ApplyFingerprint(payload, fp)
 		}
 

@@ -18,8 +18,12 @@ func init() {
 		Name: "India",
 
 		Languages: []fingerprint.LanguageConfig{
-			{Code: "hi", Weight: 0.4, Countries: []string{"IN"}}, // 印地语 40%
-			{Code: "en", Weight: 0.6, Countries: []string{"IN"}}, // 英语 60%
+			{Code: "hi", Weight: 0.35, Countries: []string{"IN"}}, // 印地语 35%
+			{Code: "ta", Weight: 0.15, Countries: []string{"IN"}}, // 泰米尔语 15%
+			{Code: "te", Weight: 0.15, Countries: []string{"IN"}}, // 泰卢固语 15%
+			{Code: "mr", Weight: 0.12, Countries: []string{"IN"}}, // 马拉地语 12%
+			{Code: "bn", Weight: 0.13, Countries: []string{"IN"}}, // 孟加拉语 13%
+			{Code: "kn", Weight: 0.10, Countries: []string{"IN"}}, // 卡纳达语 10%
 		},
 
 		DeviceDistribution: []fingerprint.PlatformDistribution{
