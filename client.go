@@ -1449,9 +1449,6 @@ func (cli *Client) handleFrame(ctx context.Context, data []byte) {
 		cli.Log.Debugf("Errored frame hex: %s", hex.EncodeToString(decompressed))
 		return
 	}
-	if cli.Log != nil {
-		cli.Log.Debugf("收到服务器节点: %s", node.XMLString())
-	}
 	cli.recvLog.Debugf("%s", node.XMLString())
 	if node.Tag == "xmlstreamend" {
 		if !cli.isExpectedDisconnect() {
