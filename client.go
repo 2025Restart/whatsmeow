@@ -552,7 +552,7 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		if fp != nil {
 			// 优先级：外部传入的运营商信息 > 手机号匹配 > 默认值
 			// 1. 优先使用外部传入的运营商信息（从代理 IP 探测获取）
-			carrierInfo := cli.getCarrierInfo()
+			carrierInfo := cli.GetCarrierInfo()
 			if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
 				// 外部传入的运营商信息优先级最高，直接覆盖
 				if cli.Log != nil && (fp.Mcc != carrierInfo.MCC || fp.Mnc != carrierInfo.MNC) {
@@ -881,9 +881,9 @@ func (cli *Client) SetCarrierInfo(mcc, mnc, operatorName string) {
 	}
 }
 
-// getCarrierInfo 获取当前设置的运营商信息（线程安全）
+// GetCarrierInfo 获取当前设置的运营商信息（线程安全）
 // 返回值的副本，避免并发修改问题
-func (cli *Client) getCarrierInfo() *CarrierInfo {
+func (cli *Client) GetCarrierInfo() *CarrierInfo {
 	cli.carrierInfoLock.RLock()
 	defer cli.carrierInfoLock.RUnlock()
 	if cli.carrierInfo == nil {
