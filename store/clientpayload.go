@@ -354,31 +354,53 @@ func SanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 		// 优先级：MCC -> LocaleCountry（如果 MCC 已设置，根据 MCC 推断 LocaleCountry）
 		if payload.UserAgent.Mcc == nil {
 			// 如果 MCC 为空，根据 LocaleCountry 推断 MCC
-			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-				country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-				switch country {
-				case "BR":
-					payload.UserAgent.Mcc = proto.String("724")
-					if payload.UserAgent.Mnc == nil {
-						payload.UserAgent.Mnc = proto.String("02")
+			// 注意：如果 MNC=000（固定宽带），保留 MNC=000，只设置 MCC
+			if payload.UserAgent.Mnc != nil && payload.UserAgent.GetMnc() == "000" {
+				// MNC=000 是固定宽带，无法从 MNC 推断 MCC，使用兜底地区
+				if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+					country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+					switch country {
+					case "BR":
+						payload.UserAgent.Mcc = proto.String("724")
+					case "IN":
+						payload.UserAgent.Mcc = proto.String("404")
+					default:
+						// 未知国家，使用印度默认（向后兼容）
+						payload.UserAgent.Mcc = proto.String("404")
 					}
-				case "IN":
+				} else {
+					// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
 					payload.UserAgent.Mcc = proto.String("404")
-					if payload.UserAgent.Mnc == nil {
-						payload.UserAgent.Mnc = proto.String("01")
-					}
-				default:
-					// 未知国家，使用印度默认（向后兼容）
-					payload.UserAgent.Mcc = proto.String("404")
-					if payload.UserAgent.Mnc == nil {
-						payload.UserAgent.Mnc = proto.String("01")
-					}
 				}
+				// MNC=000 保持不变
 			} else {
-				// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
-				payload.UserAgent.Mcc = proto.String("404")
-				if payload.UserAgent.Mnc == nil {
-					payload.UserAgent.Mnc = proto.String("01")
+				// 正常情况：根据 LocaleCountry 推断 MCC/MNC
+				if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+					country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+					switch country {
+					case "BR":
+						payload.UserAgent.Mcc = proto.String("724")
+						if payload.UserAgent.Mnc == nil {
+							payload.UserAgent.Mnc = proto.String("02")
+						}
+					case "IN":
+						payload.UserAgent.Mcc = proto.String("404")
+						if payload.UserAgent.Mnc == nil {
+							payload.UserAgent.Mnc = proto.String("01")
+						}
+					default:
+						// 未知国家，使用印度默认（向后兼容）
+						payload.UserAgent.Mcc = proto.String("404")
+						if payload.UserAgent.Mnc == nil {
+							payload.UserAgent.Mnc = proto.String("01")
+						}
+					}
+				} else {
+					// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
+					payload.UserAgent.Mcc = proto.String("404")
+					if payload.UserAgent.Mnc == nil {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
 				}
 			}
 		} else {

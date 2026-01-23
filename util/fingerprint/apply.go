@@ -207,20 +207,31 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 
 	// 2. 如果只有 MNC，推断 MCC（需要国家代码）
 	if fp.Mnc != "" && fp.Mcc == "" {
-		countryForInference := fp.LocaleCountry
-		if countryForInference == "" && effectiveRegionCode != "" {
-			countryForInference = effectiveRegionCode
-		}
-		if countryForInference != "" {
-			fp.Mcc = InferMCCFromMNC(fp.Mnc, countryForInference)
-		}
-		// 如果还是没找到，使用地区配置
-		if fp.Mcc == "" && regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
-			// 找到匹配的 MNC
-			for _, net := range regionConfig.MobileNetworks {
-				if net.MNC == fp.Mnc {
-					fp.Mcc = net.MCC
-					break
+		// MNC=000 是固定宽带，无法从 MNC 推断 MCC，直接使用兜底地区
+		if fp.Mnc == "000" {
+			if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+				fp.Mcc = regionConfig.MobileNetworks[0].MCC
+			}
+		} else {
+			countryForInference := fp.LocaleCountry
+			if countryForInference == "" && effectiveRegionCode != "" {
+				countryForInference = effectiveRegionCode
+			}
+			if countryForInference != "" {
+				fp.Mcc = InferMCCFromMNC(fp.Mnc, countryForInference)
+			}
+			// 如果还是没找到，使用地区配置
+			if fp.Mcc == "" && regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+				// 找到匹配的 MNC
+				for _, net := range regionConfig.MobileNetworks {
+					if net.MNC == fp.Mnc {
+						fp.Mcc = net.MCC
+						break
+					}
+				}
+				// 如果还是没找到匹配的 MNC，使用兜底地区的 MCC
+				if fp.Mcc == "" {
+					fp.Mcc = regionConfig.MobileNetworks[0].MCC
 				}
 			}
 		}
@@ -273,11 +284,16 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 			// 印度：确保 MCC 为 404 或 405
 			if fp.Mcc == "" || (fp.Mcc != "404" && fp.Mcc != "405") {
 				payload.UserAgent.Mcc = proto.String("404")
-				// 使用推断函数获取常见的 MNC
-				if inferredMNC := InferMNCFromMCC("404"); inferredMNC != "" {
-					payload.UserAgent.Mnc = proto.String(inferredMNC)
+				// MNC=000 是固定宽带的合法值，必须保留
+				if fp.Mnc == "000" {
+					payload.UserAgent.Mnc = proto.String("000")
 				} else {
-					payload.UserAgent.Mnc = proto.String("01")
+					// 使用推断函数获取常见的 MNC
+					if inferredMNC := InferMNCFromMCC("404"); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
 				}
 			} else {
 				payload.UserAgent.Mcc = proto.String(fp.Mcc)
@@ -296,11 +312,16 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 			// 巴西：确保 MCC 为 724
 			if fp.Mcc == "" || fp.Mcc != "724" {
 				payload.UserAgent.Mcc = proto.String("724")
-				// 使用推断函数获取常见的 MNC
-				if inferredMNC := InferMNCFromMCC("724"); inferredMNC != "" {
-					payload.UserAgent.Mnc = proto.String(inferredMNC)
+				// MNC=000 是固定宽带的合法值，必须保留
+				if fp.Mnc == "000" {
+					payload.UserAgent.Mnc = proto.String("000")
 				} else {
-					payload.UserAgent.Mnc = proto.String("02")
+					// 使用推断函数获取常见的 MNC
+					if inferredMNC := InferMNCFromMCC("724"); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("02")
+					}
 				}
 			} else {
 				payload.UserAgent.Mcc = proto.String(fp.Mcc)
@@ -328,18 +349,37 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 		// 如果 LocaleCountry 为空，使用地区配置
 		payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(effectiveRegionCode)
 		// 根据地区设置 MCC/MNC
-		if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
-			payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
-			payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+		// MNC=000 是固定宽带的合法值，必须保留
+		if fp.Mnc == "000" {
+			// 保留 MNC=000，只设置 MCC
+			if fp.Mcc != "" {
+				payload.UserAgent.Mcc = proto.String(fp.Mcc)
+			} else if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+				payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+			} else {
+				switch effectiveRegionCode {
+				case "IN":
+					payload.UserAgent.Mcc = proto.String("404")
+				case "BR":
+					payload.UserAgent.Mcc = proto.String("724")
+				}
+			}
+			payload.UserAgent.Mnc = proto.String("000")
 		} else {
-			// 根据地区推断
-			switch effectiveRegionCode {
-			case "IN":
-				payload.UserAgent.Mcc = proto.String("404")
-				payload.UserAgent.Mnc = proto.String("01")
-			case "BR":
-				payload.UserAgent.Mcc = proto.String("724")
-				payload.UserAgent.Mnc = proto.String("02")
+			// 正常设置 MCC/MNC
+			if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+				payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+				payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+			} else {
+				// 根据地区推断
+				switch effectiveRegionCode {
+				case "IN":
+					payload.UserAgent.Mcc = proto.String("404")
+					payload.UserAgent.Mnc = proto.String("01")
+				case "BR":
+					payload.UserAgent.Mcc = proto.String("724")
+					payload.UserAgent.Mnc = proto.String("02")
+				}
 			}
 		}
 	}
