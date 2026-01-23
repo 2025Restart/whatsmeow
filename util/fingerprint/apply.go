@@ -227,6 +227,7 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 	}
 
 	// 3. 如果 MCC 为空，使用地区配置的默认 MCC/MNC
+	// 注意：如果 MNC=000（固定宽带），不会被覆盖（因为只在 fp.Mnc == "" 时设置）
 	if fp.Mcc == "" && regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
 		fp.Mcc = regionConfig.MobileNetworks[0].MCC
 		if fp.Mnc == "" {
@@ -236,7 +237,8 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 
 	// 4. 验证 MCC/MNC 组合有效性
 	if fp.Mcc != "" && fp.Mnc != "" {
-		if !ValidateMCCMNC(fp.Mcc, fp.Mnc) {
+		// MNC=000 是固定宽带的合法值，不进行修正
+		if fp.Mnc != "000" && !ValidateMCCMNC(fp.Mcc, fp.Mnc) {
 			// 如果组合无效，尝试修正
 			if inferredMNC := InferMNCFromMCC(fp.Mcc); inferredMNC != "" {
 				fp.Mnc = inferredMNC

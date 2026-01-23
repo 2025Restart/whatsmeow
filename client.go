@@ -717,11 +717,18 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 
 				// 验证 MCC/MNC 组合
 				if fp.Mcc != "" && fp.Mnc != "" {
-					isValid := fingerprint.ValidateMCCMNC(fp.Mcc, fp.Mnc)
-					if !isValid {
-						cli.Log.Warnf("[Fingerprint] Invalid MCC/MNC combination: %s-%s, will be corrected during ApplyFingerprint", fp.Mcc, fp.Mnc)
-					} else if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
-						cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
+					// MNC=000 是固定宽带的合法值，不发出警告
+					if fp.Mnc == "000" {
+						if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
+							cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s (fixed broadband)", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
+						}
+					} else {
+						isValid := fingerprint.ValidateMCCMNC(fp.Mcc, fp.Mnc)
+						if !isValid {
+							cli.Log.Warnf("[Fingerprint] Invalid MCC/MNC combination: %s-%s, will be corrected during ApplyFingerprint", fp.Mcc, fp.Mnc)
+						} else if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
+							cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
+						}
 					}
 				}
 			}

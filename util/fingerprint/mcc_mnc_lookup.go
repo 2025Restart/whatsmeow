@@ -129,6 +129,10 @@ func InferMCCFromMNC(mnc, countryCode string) string {
 
 // ValidateMCCMNC 验证 MCC/MNC 组合是否有效
 func ValidateMCCMNC(mcc, mnc string) bool {
+	// MNC=000 是固定宽带的合法值（固定宽带没有MNC）
+	if mnc == "000" {
+		return true
+	}
 	if entries, ok := mccMNCList[mcc]; ok {
 		for _, entry := range entries {
 			if entry.MNC == mnc {
