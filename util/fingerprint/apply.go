@@ -437,15 +437,46 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 		}
 	}
 	if payload.UserAgent.Mnc != nil && payload.UserAgent.Mcc == nil {
-		countryForInference := ""
-		if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-			countryForInference = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-		} else if effectiveRegionCode != "" {
-			countryForInference = effectiveRegionCode
-		}
-		if countryForInference != "" {
-			if inferredMCC := InferMCCFromMNC(payload.UserAgent.GetMnc(), countryForInference); inferredMCC != "" {
-				payload.UserAgent.Mcc = proto.String(inferredMCC)
+		// MNC=000 是固定宽带，无法从 MNC 推断 MCC，使用兜底逻辑
+		if payload.UserAgent.GetMnc() == "000" {
+			// 根据 LocaleCountry 或地区配置设置 MCC
+			countryForMCC := ""
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+				countryForMCC = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+			} else if effectiveRegionCode != "" {
+				countryForMCC = effectiveRegionCode
+			}
+			if countryForMCC != "" {
+				switch countryForMCC {
+				case "IN":
+					payload.UserAgent.Mcc = proto.String("404")
+				case "BR":
+					payload.UserAgent.Mcc = proto.String("724")
+				default:
+					// 未知国家，使用地区配置或默认值
+					if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+						payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+					} else {
+						payload.UserAgent.Mcc = proto.String("404") // 默认印度
+					}
+				}
+			} else if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+				payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+			} else {
+				payload.UserAgent.Mcc = proto.String("404") // 默认印度
+			}
+		} else {
+			// 正常情况：从 MNC 推断 MCC
+			countryForInference := ""
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+				countryForInference = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+			} else if effectiveRegionCode != "" {
+				countryForInference = effectiveRegionCode
+			}
+			if countryForInference != "" {
+				if inferredMCC := InferMCCFromMNC(payload.UserAgent.GetMnc(), countryForInference); inferredMCC != "" {
+					payload.UserAgent.Mcc = proto.String(inferredMCC)
+				}
 			}
 		}
 	}
