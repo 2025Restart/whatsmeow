@@ -364,8 +364,16 @@ func (cli *Client) doMediaDownloadRequest(ctx context.Context, url string) (*htt
 	}
 	if cli.MessengerConfig != nil {
 		req.Header.Set("User-Agent", cli.MessengerConfig.UserAgent)
-		req.Header.Set("Origin", socket.Origin)
-		req.Header.Set("Referer", socket.Origin+"/")
+		req.Header.Set("Origin", cli.MessengerConfig.BaseURL)
+		req.Header.Set("Referer", cli.MessengerConfig.BaseURL+"/")
+		// Messenger 媒体下载也需要完整的浏览器头部
+		// GET 请求（下载）：使用更具体的媒体类型Accept头
+		req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,video/*,audio/*,application/octet-stream,*/*;q=0.8")
+		req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		req.Header.Set("Sec-Fetch-Dest", "empty")
+		req.Header.Set("Sec-Fetch-Mode", "cors")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
 	} else {
 		// 设置完整的浏览器头
 		cli.setBrowserHeaders(req, false)

@@ -9,6 +9,8 @@ package whatsmeow
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
+	"math/rand"
 	"net/http"
 	"strings"
 
@@ -16,15 +18,26 @@ import (
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // generateUserAgent 根据 Payload 信息生成浏览器 User-Agent 字符串
 // 优先从 ClientPayload 中提取，确保与握手包 100% 一致
+// 使用设备ID作为种子确保同一设备版本号一致
 func (cli *Client) generateUserAgent() string {
+	// 获取设备ID作为随机种子（确保同一设备版本号一致）
+	seed := ""
+	if cli.Store != nil && cli.Store.ID != nil {
+		seed = cli.Store.ID.String()
+	}
+	
+	// 获取地区信息
+	fp := cli.getFingerprintInfo()
+	country := fp.LocaleCountry
+	
 	payload := cli.Store.GetClientPayload()
 	if payload == nil || payload.UserAgent == nil {
 		// Fallback: 如果没有 Payload，尝试使用指纹
-		fp := cli.getFingerprintInfo()
 		platformType := fp.PlatformType
 		if platformType == 0 {
 			platformType = waCompanionReg.DeviceProps_CHROME
@@ -37,7 +50,7 @@ func (cli *Client) generateUserAgent() string {
 		if osVersion == "" {
 			osVersion = "10.0.0"
 		}
-		return generateBrowserUserAgent(platformType, osName, osVersion)
+		return generateBrowserUserAgentWithSeedAndCountry(platformType, osName, osVersion, seed, country)
 	}
 
 	// 核心：从 Payload 提取字段
@@ -47,13 +60,18 @@ func (cli *Client) generateUserAgent() string {
 		osName = "macOS"
 	}
 	
+	// 从 Payload 获取国家（如果可用）
+	if ua.LocaleCountryIso31661Alpha2 != nil {
+		country = ua.GetLocaleCountryIso31661Alpha2()
+	}
+	
 	// 从 PlatformType 推断
 	platformType := waCompanionReg.DeviceProps_CHROME
 	if payload.WebInfo != nil {
 		// TODO: WebSubPlatform 映射到 DeviceProps_PlatformType
 	}
 	
-	return generateBrowserUserAgent(platformType, osName, ua.GetOsVersion())
+	return generateBrowserUserAgentWithSeedAndCountry(platformType, osName, ua.GetOsVersion(), seed, country)
 }
 
 // fingerprintInfo 指纹信息结构
@@ -101,16 +119,43 @@ func (cli *Client) getFingerprintInfo() fingerprintInfo {
 	return fp
 }
 
+// getChromeVersion 基于设备ID生成确定性的Chrome版本号（131.0.0.0 - 131.0.2.0）
+// 确保同一设备每次生成的版本号一致，不同设备有差异
+// 参考：Chrome 131+ 版本分布（2024-2025）
+func getChromeVersion(seed, country string) string {
+	if seed == "" {
+		return "131.0.0.0"
+	}
+	h := fnv.New32a()
+	h.Write([]byte(seed + country))
+	r := rand.New(rand.NewSource(int64(h.Sum32())))
+	// 随机微调：131.0.0.0, 131.0.1.0, 131.0.2.0
+	// 注意：地区差异缺乏明确依据，仅保留设备ID差异
+	patch := r.Intn(3) // 0, 1, 2
+	return fmt.Sprintf("131.0.%d.0", patch)
+}
+
 // generateBrowserUserAgent 根据浏览器类型和操作系统生成 User-Agent
 func generateBrowserUserAgent(platformType waCompanionReg.DeviceProps_PlatformType, osName, osVersion string) string {
+	return generateBrowserUserAgentWithSeed(platformType, osName, osVersion, "")
+}
+
+// generateBrowserUserAgentWithSeed 根据浏览器类型和操作系统生成 User-Agent（带种子用于版本随机化）
+func generateBrowserUserAgentWithSeed(platformType waCompanionReg.DeviceProps_PlatformType, osName, osVersion, seed string) string {
+	return generateBrowserUserAgentWithSeedAndCountry(platformType, osName, osVersion, seed, "")
+}
+
+// generateBrowserUserAgentWithSeedAndCountry 根据浏览器类型、操作系统和地区生成 User-Agent
+func generateBrowserUserAgentWithSeedAndCountry(platformType waCompanionReg.DeviceProps_PlatformType, osName, osVersion, seed, country string) string {
 	osLower := strings.ToLower(osName)
+	chromeVersion := getChromeVersion(seed, country)
 	
 	switch platformType {
 	case waCompanionReg.DeviceProps_CHROME:
 		// Chrome User-Agent 格式（使用较新的版本号）
 		// 参考：Chrome 130+ 版本（2024-2025）
 		osPart := getOSUserAgentPart(osName, osVersion)
-		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", osPart)
+		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s Safari/537.36", osPart, chromeVersion)
 	case waCompanionReg.DeviceProps_FIREFOX:
 		// Firefox User-Agent 格式（使用较新的版本号）
 		osPart := getOSUserAgentPart(osName, osVersion)
@@ -118,7 +163,7 @@ func generateBrowserUserAgent(platformType waCompanionReg.DeviceProps_PlatformTy
 	case waCompanionReg.DeviceProps_EDGE:
 		// Edge User-Agent 格式（Edge 版本通常与 Chrome 版本接近）
 		osPart := getOSUserAgentPart(osName, osVersion)
-		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0", osPart)
+		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s Safari/537.36 Edg/%s", osPart, chromeVersion, chromeVersion)
 	case waCompanionReg.DeviceProps_SAFARI, waCompanionReg.DeviceProps_CATALINA:
 		// Safari User-Agent 格式（macOS）
 		// 参考：Safari 18.x 版本（macOS Sequoia/Sonoma）
@@ -131,15 +176,16 @@ func generateBrowserUserAgent(platformType waCompanionReg.DeviceProps_PlatformTy
 		}
 		// 非 macOS 使用 Chrome 格式
 		osPart := getOSUserAgentPart(osName, osVersion)
-		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", osPart)
+		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s Safari/537.36", osPart, chromeVersion)
 	case waCompanionReg.DeviceProps_OPERA:
 		// Opera User-Agent 格式（Opera 版本通常比 Chrome 稍低）
 		osPart := getOSUserAgentPart(osName, osVersion)
-		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 OPR/117.0.0.0", osPart)
+		// Opera 版本通常比 Chrome 低 14 个版本
+		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s Safari/537.36 OPR/117.0.0.0", osPart, chromeVersion)
 	default:
 		// 默认使用 Chrome
 		osPart := getOSUserAgentPart(osName, osVersion)
-		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", osPart)
+		return fmt.Sprintf("Mozilla/5.0 (%s) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/%s Safari/537.36", osPart, chromeVersion)
 	}
 }
 
@@ -233,7 +279,7 @@ func normalizeWindowsVersion(version string) string {
 	return version
 }
 
-// generateAcceptLanguage 根据指纹信息生成 Accept-Language 头
+// generateAcceptLanguage 根据指纹信息生成 Accept-Language 头（带随机性）
 func (cli *Client) generateAcceptLanguage() string {
 	fp := cli.getFingerprintInfo()
 	
@@ -248,22 +294,42 @@ func (cli *Client) generateAcceptLanguage() string {
 		country = "US"
 	}
 	
+	// 获取设备ID作为随机种子
+	seed := ""
+	if cli.Store != nil && cli.Store.ID != nil {
+		seed = cli.Store.ID.String()
+	}
+	h := fnv.New32a()
+	h.Write([]byte(seed + "accept-lang"))
+	r := rand.New(rand.NewSource(int64(h.Sum32())))
+	
 	// 根据语言和国家生成 Accept-Language
 	// 格式：en-US,en;q=0.9 或 hi-IN,hi;q=0.9,en;q=0.8
-	// 根据地区添加次要语言
+	// 根据地区添加次要语言，并添加细微的随机性
 	switch country {
 	case "IN":
 		// 印度本地语种：不再包含 en
-		return fmt.Sprintf("%s-IN,%s;q=0.9", lang, lang)
+		// 随机微调 q 值：0.85-0.95
+		q1 := 0.85 + r.Float64()*0.1
+		return fmt.Sprintf("%s-IN,%s;q=%.2f", lang, lang, q1)
 	case "BR":
 		// 巴西：包含 pt-BR 和可能的 en-US
 		if lang == "en" {
-			return "en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7"
+			q1 := 0.85 + r.Float64()*0.1
+			q2 := 0.75 + r.Float64()*0.1
+			q3 := 0.65 + r.Float64()*0.1
+			return fmt.Sprintf("en-US,en;q=%.2f,pt-BR;q=%.2f,pt;q=%.2f", q1, q2, q3)
 		}
-		return "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"
+		q1 := 0.85 + r.Float64()*0.1
+		q2 := 0.75 + r.Float64()*0.1
+		q3 := 0.65 + r.Float64()*0.1
+		return fmt.Sprintf("pt-BR,pt;q=%.2f,en-US;q=%.2f,en;q=%.2f", q1, q2, q3)
 	default:
-		// 默认：英语为主
-		return fmt.Sprintf("%s-%s,%s;q=0.9,en-US;q=0.8,en;q=0.7", lang, country, lang)
+		// 默认：英语为主，添加随机性
+		q1 := 0.85 + r.Float64()*0.1
+		q2 := 0.75 + r.Float64()*0.1
+		q3 := 0.65 + r.Float64()*0.1
+		return fmt.Sprintf("%s-%s,%s;q=%.2f,en-US;q=%.2f,en;q=%.2f", lang, country, lang, q1, q2, q3)
 	}
 }
 
@@ -272,28 +338,81 @@ func (cli *Client) setBrowserHeaders(req *http.Request, isWebSocket bool) {
 	userAgent := cli.generateUserAgent()
 	req.Header.Set("User-Agent", userAgent)
 	
+	if cli.Log != nil {
+		cli.Log.Debugf("[HTTP Headers] Setting headers for %s %s: UA=%s", req.Method, req.URL.Path, userAgent)
+	}
+	
 	if isWebSocket {
-		// WebSocket 连接头
+		// WebSocket 连接头（WhatsApp Web: 从 web.whatsapp.com 到同一域名，应为 same-origin）
 		req.Header.Set("Origin", socket.Origin)
 		req.Header.Set("Sec-Fetch-Dest", "empty")
 		req.Header.Set("Sec-Fetch-Mode", "websocket")
-		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		req.Header.Set("Sec-Fetch-Site", "same-origin")
 		req.Header.Set("Cache-Control", "no-cache")
 		req.Header.Set("Pragma", "no-cache")
 	} else {
 		// HTTP 请求头（媒体上传/下载）
 		req.Header.Set("Origin", socket.Origin)
 		req.Header.Set("Referer", socket.Origin+"/")
-		// Accept 头应该更具体，根据请求类型设置
-		// 对于媒体上传/下载，使用通用的媒体类型
-		req.Header.Set("Accept", "application/json, text/plain, */*")
+		// Accept 头：媒体下载使用更具体的类型，上传保持通用格式
+		// 真实浏览器在下载媒体时会发送更广泛的Accept头，添加随机性
+		// 参考：Chrome 131+ 标准 Accept 头格式
+		if req.Method == http.MethodGet {
+			// GET 请求（下载）：优先媒体类型，添加细微的顺序变化
+			seed := ""
+			if cli.Store != nil && cli.Store.ID != nil {
+				seed = cli.Store.ID.String()
+			}
+			h := fnv.New32a()
+			h.Write([]byte(seed + "accept"))
+			r := rand.New(rand.NewSource(int64(h.Sum32())))
+			q := 0.75 + r.Float64()*0.1 // 0.75-0.85
+			
+			// Chrome 131+ 标准 Accept 头变体（基于真实浏览器行为）
+			acceptVariants := []string{
+				fmt.Sprintf("image/avif,image/webp,image/apng,image/*,video/*,audio/*,application/octet-stream,*/*;q=%.2f", q),
+				fmt.Sprintf("image/*,video/*,audio/*,image/avif,image/webp,image/apng,application/octet-stream,*/*;q=%.2f", q),
+				fmt.Sprintf("image/avif,image/webp,image/*,video/*,audio/*,image/apng,application/octet-stream,*/*;q=%.2f", q),
+			}
+			req.Header.Set("Accept", acceptVariants[r.Intn(len(acceptVariants))])
+		} else {
+			// POST/PUT 请求（上传）：使用通用格式，添加细微变化
+			seed := ""
+			if cli.Store != nil && cli.Store.ID != nil {
+				seed = cli.Store.ID.String()
+			}
+			h := fnv.New32a()
+			h.Write([]byte(seed + "accept-upload"))
+			r := rand.New(rand.NewSource(int64(h.Sum32())))
+			acceptVariants := []string{
+				"application/json, text/plain, */*",
+				"application/json,text/plain,*/*",
+				"*/*, application/json, text/plain",
+			}
+			req.Header.Set("Accept", acceptVariants[r.Intn(len(acceptVariants))])
+		}
 		// 根据指纹信息生成 Accept-Language
 		req.Header.Set("Accept-Language", cli.generateAcceptLanguage())
 		req.Header.Set("Sec-Fetch-Dest", "empty")
 		req.Header.Set("Sec-Fetch-Mode", "cors")
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
-		// 添加 Accept-Encoding（真实浏览器会发送）
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+		// WhatsApp Web: 媒体请求从 web.whatsapp.com 发起到 mmg*.whatsapp.net，应为 cross-site
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		// 添加 Accept-Encoding（真实浏览器会发送，Chrome 131+ 标准格式）
+		seed := ""
+		if cli.Store != nil && cli.Store.ID != nil {
+			seed = cli.Store.ID.String()
+		}
+		h := fnv.New32a()
+		h.Write([]byte(seed + "accept-encoding"))
+		r := rand.New(rand.NewSource(int64(h.Sum32())))
+		
+		// Chrome 131+ 标准 Accept-Encoding 变体（基于真实浏览器行为）
+		encodingVariants := []string{
+			"gzip, deflate, br",
+			"gzip, br, deflate",
+			"gzip, deflate",
+		}
+		req.Header.Set("Accept-Encoding", encodingVariants[r.Intn(len(encodingVariants))])
 	}
 }
 
@@ -304,9 +423,14 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 	headers.Set("Origin", socket.Origin)
 	headers.Set("Sec-Fetch-Dest", "empty")
 	headers.Set("Sec-Fetch-Mode", "websocket")
-	headers.Set("Sec-Fetch-Site", "cross-site")
+	// WhatsApp Web: 从 web.whatsapp.com 页面发起 WebSocket 连接到同一域名，应为 same-origin
+	headers.Set("Sec-Fetch-Site", "same-origin")
 	headers.Set("Cache-Control", "no-cache")
 	headers.Set("Pragma", "no-cache")
+	
+	if cli.Log != nil {
+		cli.Log.Debugf("[WebSocket Headers] Setting headers for WhatsApp Web: UA=%s, Origin=%s, Sec-Fetch-Site=same-origin", userAgent, socket.Origin)
+	}
 
 	// 注入现代浏览器 Client Hints (解决 cln/cco/atn 报错)
 	// 确保获取最新的 Payload（如果 GetClientPayload 已设置，使用它以确保一致性）
@@ -325,14 +449,36 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 		}
 		
 		// 确保 Client Hints 格式正确（避免 atn/cln 封控）
+		// 使用与 UA 一致的 Chrome 版本号（考虑地区）
+		seed := ""
+		country := ""
+		if cli.Store != nil {
+			if cli.Store.ID != nil {
+				seed = cli.Store.ID.String()
+			}
+			fp := cli.getFingerprintInfo()
+			country = fp.LocaleCountry
+			// 优先使用 Payload 中的国家信息
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+				country = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+			}
+		}
+		chromeVersion := getChromeVersion(seed, country)
+		// 提取主版本号（131.0.1.0 -> 131）
+		versionParts := strings.Split(chromeVersion, ".")
+		mainVersion := "131"
+		if len(versionParts) > 0 {
+			mainVersion = versionParts[0]
+		}
+		
 		headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
 		headers.Set("Sec-Ch-Ua-Mobile", "?0") // 强制锁定为 PC 端
-		headers.Set("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", mainVersion, mainVersion))
 		
 		// 记录 Client Hints 设置（用于验证）
 		if cli.Log != nil {
-			cli.Log.Debugf("[Fingerprint] Set Client Hints: Platform=%s, Mobile=?0, UA=Chrome/131, MCC=%s, MNC=%s", 
-				osName, payload.UserAgent.GetMcc(), payload.UserAgent.GetMnc())
+			cli.Log.Debugf("[Fingerprint] Set Client Hints: Platform=%s, Mobile=?0, UA=Chrome/%s, MCC=%s, MNC=%s", 
+				osName, mainVersion, payload.UserAgent.GetMcc(), payload.UserAgent.GetMnc())
 			
 			// 验证 WEB 平台特征一致性（避免 vll/lla/atn/cln 封控）
 			if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
@@ -368,10 +514,26 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 			}
 		}
 	} else {
-		// 如果 payload 为空，使用默认值
+		// 如果 payload 为空，使用默认值（确保与 UA 版本一致，考虑地区）
+		seed := ""
+		country := ""
+		if cli.Store != nil {
+			if cli.Store.ID != nil {
+				seed = cli.Store.ID.String()
+			}
+			fp := cli.getFingerprintInfo()
+			country = fp.LocaleCountry
+		}
+		chromeVersion := getChromeVersion(seed, country)
+		versionParts := strings.Split(chromeVersion, ".")
+		mainVersion := "131"
+		if len(versionParts) > 0 {
+			mainVersion = versionParts[0]
+		}
+		
 		headers.Set("Sec-Ch-Ua-Platform", "\"Windows\"")
 		headers.Set("Sec-Ch-Ua-Mobile", "?0")
-		headers.Set("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", mainVersion, mainVersion))
 		if cli.Log != nil {
 			cli.Log.Debugf("[Fingerprint] Set default Client Hints (payload is nil)")
 		}

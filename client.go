@@ -1129,9 +1129,10 @@ func (cli *Client) unlockedConnect(ctx context.Context) error {
 		fs.HTTPHeaders.Set("User-Agent", cli.MessengerConfig.UserAgent)
 		fs.HTTPHeaders.Set("Cache-Control", "no-cache")
 		fs.HTTPHeaders.Set("Pragma", "no-cache")
-		//fs.HTTPHeaders.Set("Sec-Fetch-Dest", "empty")
-		//fs.HTTPHeaders.Set("Sec-Fetch-Mode", "websocket")
-		//fs.HTTPHeaders.Set("Sec-Fetch-Site", "cross-site")
+		// Messenger WebSocket 也需要 Sec-Fetch-* 头部以模拟真实浏览器
+		fs.HTTPHeaders.Set("Sec-Fetch-Dest", "empty")
+		fs.HTTPHeaders.Set("Sec-Fetch-Mode", "websocket")
+		fs.HTTPHeaders.Set("Sec-Fetch-Site", "cross-site")
 	} else {
 		// 为 WhatsApp WebSocket 连接设置完整的浏览器头
 		cli.setWebSocketHeaders(fs.HTTPHeaders)
