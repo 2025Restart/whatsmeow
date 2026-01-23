@@ -211,12 +211,18 @@ func (device *Device) getHistorySyncProps() *waCompanionReg.DeviceProps {
 		props.HistorySyncConfig = &waCompanionReg.DeviceProps_HistorySyncConfig{}
 	}
 
-	// 随机微调存储配额 (10GB - 20GB)
-	quota := 10240 + uint32(r.Intn(10240))
-	props.HistorySyncConfig.StorageQuotaMb = proto.Uint32(quota)
-
-	// 随机决定是否支持某些次要特性
-	props.HistorySyncConfig.SupportCallLogHistory = proto.Bool(r.Intn(2) == 0)
+	// 针对 WEB 平台锁定配置，避免随机化导致的特征异常
+	isWeb := props.GetPlatformType() != waCompanionReg.DeviceProps_UNKNOWN // 默认大多是浏览器
+	if isWeb {
+		props.HistorySyncConfig.StorageQuotaMb = proto.Uint32(10240) // 固定 10GB
+		props.HistorySyncConfig.SupportCallLogHistory = proto.Bool(true)
+		props.HistorySyncConfig.SupportRecentSyncChunkMessageCountTuning = proto.Bool(true)
+	} else {
+		// 非 WEB 平台保留随机化
+		quota := 10240 + uint32(r.Intn(10240))
+		props.HistorySyncConfig.StorageQuotaMb = proto.Uint32(quota)
+		props.HistorySyncConfig.SupportCallLogHistory = proto.Bool(r.Intn(2) == 0)
+	}
 
 	return props
 }
@@ -273,7 +279,7 @@ func (device *Device) getRegistrationPayload() *waWa6.ClientPayload {
 		payload.ConnectReason = reasons[r.Intn(len(reasons))].Enum()
 	}
 
-	return sanitizeClientPayload(payload)
+	return SanitizeClientPayload(payload)
 }
 
 func (device *Device) getLoginPayload() *waWa6.ClientPayload {
@@ -304,14 +310,36 @@ func (device *Device) getLoginPayload() *waWa6.ClientPayload {
 		payload.ConnectReason = reasons[r.Intn(len(reasons))].Enum()
 	}
 
-	return sanitizeClientPayload(payload)
+	return SanitizeClientPayload(payload)
 }
 
-// sanitizeClientPayload 最后的特征清理（防火墙）
-func sanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
+// SanitizeClientPayload 最后的特征清理（防火墙）
+// 导出此函数以便在 ApplyFingerprint 后调用，确保清理完整
+func SanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 	if payload == nil {
 		return nil
 	}
+
+	// 1. 强制 WebInfo 完整性 (解决 lla 封控)
+	if payload.WebInfo == nil {
+		payload.WebInfo = &waWa6.ClientPayload_WebInfo{
+			WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum(),
+		}
+	} else if payload.WebInfo.WebSubPlatform == nil {
+		payload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()
+	}
+
+	// 2. 彻底清理 WEB 平台泄露特征 (解决 vll 封控)
+	isWeb := payload.UserAgent != nil && payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB
+	if isWeb {
+		// 强制置空移动端专有字段
+		payload.UserAgent.OsBuildNumber = nil
+		payload.UserAgent.DeviceBoard = nil
+		payload.UserAgent.DeviceModelType = nil
+		// 强制锁定桌面设备名称
+		payload.UserAgent.Device = proto.String("Desktop")
+	}
+
 	// L5: 彻底禁止 whatsmeow 特征泄露
 	if payload.UserAgent != nil {
 		if payload.UserAgent.Manufacturer != nil && (*payload.UserAgent.Manufacturer == "whatsmeow" || *payload.UserAgent.Manufacturer == "Unknown") {

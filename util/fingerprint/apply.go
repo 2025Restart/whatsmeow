@@ -427,10 +427,19 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 		// 强制清理移动端残留字段（彻底清理，避免 vll 封控）
 		payload.UserAgent.OsBuildNumber = nil
 		payload.UserAgent.DeviceBoard = nil
-		payload.UserAgent.DeviceModelType = nil // 移动端字段
+		payload.UserAgent.DeviceModelType = nil                  // 移动端字段
+		payload.UserAgent.OsVersion = proto.String(fp.OsVersion) // 确保有值但无 BuildNumber
 
 		// 强制对齐桌面特征
 		payload.UserAgent.Device = proto.String("Desktop")
+		if payload.UserAgent.Manufacturer == nil || *payload.UserAgent.Manufacturer == "Unknown" {
+			// 根据 OS 设置默认 Manufacturer
+			if strings.Contains(strings.ToLower(fp.DevicePropsOs), "windows") {
+				payload.UserAgent.Manufacturer = proto.String("Microsoft")
+			} else if strings.Contains(strings.ToLower(fp.DevicePropsOs), "mac") {
+				payload.UserAgent.Manufacturer = proto.String("Apple")
+			}
+		}
 
 		// 确保 Platform 是 WEB
 		if payload.UserAgent.Platform == nil {
@@ -595,8 +604,13 @@ func inferPlatformTypeFromOs(osValue string) *waCompanionReg.DeviceProps_Platfor
 	return waCompanionReg.DeviceProps_CHROME.Enum()
 }
 
-// getCountryByMCC 根据 MCC 返回对应的国家代码
+// getCountryByMCC 根据 MCC 返回对应的国家代码（包内使用）
 func getCountryByMCC(mcc string) string {
+	return GetCountryByMCC(mcc)
+}
+
+// GetCountryByMCC 根据 MCC 返回对应的国家代码（导出函数）
+func GetCountryByMCC(mcc string) string {
 	switch mcc {
 	case "404", "405":
 		return "IN"
@@ -609,12 +623,26 @@ func getCountryByMCC(mcc string) string {
 
 // isMCCCountryMatch 检查 MCC 是否与国家代码匹配
 func isMCCCountryMatch(mcc, countryCode string) bool {
+	if mcc == "" || countryCode == "" {
+		return true // 无法判断时不触发强制修正
+	}
+	// 常见的国家-MCC 映射
 	switch countryCode {
 	case "IN":
 		return mcc == "404" || mcc == "405"
 	case "BR":
 		return mcc == "724"
+	case "US":
+		return strings.HasPrefix(mcc, "310") || strings.HasPrefix(mcc, "311") || strings.HasPrefix(mcc, "312") || strings.HasPrefix(mcc, "313") || strings.HasPrefix(mcc, "316")
+	case "GB":
+		return mcc == "234" || mcc == "235"
+	case "RU":
+		return mcc == "250"
+	case "ID":
+		return mcc == "510"
 	default:
-		return false
+		// 兜底逻辑：如果前两位/三位数字不符合大洲范围，可能不匹配
+		// 这种通用检查避免大部分 frc/rva 封控
+		return true
 	}
 }

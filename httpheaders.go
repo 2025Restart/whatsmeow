@@ -279,18 +279,36 @@ func normalizeWindowsVersion(version string) string {
 }
 
 // generateAcceptLanguage 根据指纹信息生成 Accept-Language 头（带随机性）
+// 优先从 ClientPayload 中提取，确保与握手包 100% 一致
 func (cli *Client) generateAcceptLanguage() string {
-	fp := cli.getFingerprintInfo()
-
-	lang := fp.LocaleLanguage
-	country := fp.LocaleCountry
-
-	// 如果没有语言信息，使用默认值
-	if lang == "" {
-		lang = "en"
+	// 核心：获取当前的 Payload
+	var payload *waWa6.ClientPayload
+	if cli.GetClientPayload != nil {
+		payload = cli.GetClientPayload()
+	} else {
+		payload = cli.Store.GetClientPayload()
 	}
-	if country == "" {
-		country = "US"
+
+	lang := "en"
+	country := "US"
+
+	// 优先从 Payload 提取语言和国家
+	if payload != nil && payload.UserAgent != nil {
+		if payload.UserAgent.LocaleLanguageIso6391 != nil {
+			lang = payload.UserAgent.GetLocaleLanguageIso6391()
+		}
+		if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+			country = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+		}
+	} else {
+		// Fallback: 使用指纹
+		fp := cli.getFingerprintInfo()
+		if fp.LocaleLanguage != "" {
+			lang = fp.LocaleLanguage
+		}
+		if fp.LocaleCountry != "" {
+			country = fp.LocaleCountry
+		}
 	}
 
 	// 获取设备ID作为随机种子
@@ -470,9 +488,16 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 			mainVersion = versionParts[0]
 		}
 
+		// 规范 Client Hints 格式 (解决 cco/atn/cln 封控)
+		// 1. Sec-Ch-Ua-Platform 必须带双引号
 		headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
-		headers.Set("Sec-Ch-Ua-Mobile", "?0") // 强制锁定为 PC 端
+		// 2. Sec-Ch-Ua-Mobile 必须是 ?0
+		headers.Set("Sec-Ch-Ua-Mobile", "?0")
+		// 3. Sec-Ch-Ua 必须符合规范，包含 Chromium 和 Google Chrome 且版本一致
+		// 注意：Not_A Brand 版本号通常是 24 或 99
 		headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", mainVersion, mainVersion))
+		// 4. 补充 Full Version List (可选但建议)
+		headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", chromeVersion, chromeVersion))
 
 		// 记录 Client Hints 设置（用于验证）
 		if cli.Log != nil {

@@ -358,6 +358,9 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		var fp *store.DeviceFingerprint
 		var err error
 
+		// 提前获取 carrierInfo，用于在生成指纹时使用
+		carrierInfo := cli.GetCarrierInfo()
+
 		if jid == types.EmptyJID {
 			// 配对阶段：尝试从数据库读取临时指纹（使用电话号码 JID）
 			var tempJID types.JID
@@ -395,6 +398,21 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 				if cli.pendingFingerprint == nil {
 					// 生成临时指纹
 					cli.pendingFingerprint = fingerprint.GenerateFingerprint(dynamicRegion)
+					// 如果已有 carrierInfo，立即使用它覆盖 MCC/MNC（在保存前）
+					if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
+						cli.pendingFingerprint.Mcc = carrierInfo.MCC
+						cli.pendingFingerprint.Mnc = carrierInfo.MNC
+						// 根据 MCC 同步 LocaleCountry
+						if countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC); countryFromMCC != "" {
+							cli.pendingFingerprint.LocaleCountry = countryFromMCC
+						} else if dynamicRegion != "" {
+							cli.pendingFingerprint.LocaleCountry = dynamicRegion
+						}
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Applied carrier info to new fingerprint: MCC=%s, MNC=%s, Country=%s",
+								carrierInfo.MCC, carrierInfo.MNC, cli.pendingFingerprint.LocaleCountry)
+						}
+					}
 					cli.pendingFingerprintSaved.Store(false) // 重置保存标记
 					if cli.Log != nil {
 						cli.Log.Infof("Generated temporary fingerprint for pairing (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
@@ -515,6 +533,21 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 					cli.pendingFingerprintLock.Unlock()
 					// 生成新指纹
 					fp = fingerprint.GenerateFingerprint(dynamicRegion)
+					// 如果已有 carrierInfo，立即使用它覆盖 MCC/MNC（在保存前）
+					if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
+						fp.Mcc = carrierInfo.MCC
+						fp.Mnc = carrierInfo.MNC
+						// 根据 MCC 同步 LocaleCountry
+						if countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC); countryFromMCC != "" {
+							fp.LocaleCountry = countryFromMCC
+						} else if dynamicRegion != "" {
+							fp.LocaleCountry = dynamicRegion
+						}
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Applied carrier info to new fingerprint: MCC=%s, MNC=%s, Country=%s",
+								carrierInfo.MCC, carrierInfo.MNC, fp.LocaleCountry)
+						}
+					}
 					if cli.Log != nil {
 						cli.Log.Infof("[Fingerprint] Generated new fingerprint for %s (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
 							jid.User, dynamicRegion, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
@@ -552,15 +585,39 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		if fp != nil {
 			// 优先级：外部传入的运营商信息 > 手机号匹配 > 默认值
 			// 1. 优先使用外部传入的运营商信息（从代理 IP 探测获取）
-			carrierInfo := cli.GetCarrierInfo()
+			// 记录原始值，用于判断是否需要更新数据库
+			originalMCC := fp.Mcc
+			originalMNC := fp.Mnc
+			originalCountry := fp.LocaleCountry
+			needsUpdate := false
+
 			if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
 				// 外部传入的运营商信息优先级最高，直接覆盖
-				if cli.Log != nil && (fp.Mcc != carrierInfo.MCC || fp.Mnc != carrierInfo.MNC) {
-					cli.Log.Infof("[Fingerprint] Using carrier info from proxy IP: %s-%s (%s) -> overriding fingerprint MCC/MNC: %s-%s -> %s-%s",
-						carrierInfo.MCC, carrierInfo.MNC, carrierInfo.OperatorName, fp.Mcc, fp.Mnc, carrierInfo.MCC, carrierInfo.MNC)
+				if fp.Mcc != carrierInfo.MCC || fp.Mnc != carrierInfo.MNC {
+					if cli.Log != nil {
+						cli.Log.Infof("[Fingerprint] Using carrier info from proxy IP: %s-%s (%s) -> overriding fingerprint MCC/MNC: %s-%s -> %s-%s",
+							carrierInfo.MCC, carrierInfo.MNC, carrierInfo.OperatorName, fp.Mcc, fp.Mnc, carrierInfo.MCC, carrierInfo.MNC)
+					}
+					fp.Mcc = carrierInfo.MCC
+					fp.Mnc = carrierInfo.MNC
+					needsUpdate = true
 				}
-				fp.Mcc = carrierInfo.MCC
-				fp.Mnc = carrierInfo.MNC
+				// 根据 MCC 同步 LocaleCountry，确保与 dynamicRegion 一致
+				countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC)
+				if countryFromMCC != "" && fp.LocaleCountry != countryFromMCC {
+					if cli.Log != nil {
+						cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry with MCC: %s -> %s (MCC: %s)", fp.LocaleCountry, countryFromMCC, carrierInfo.MCC)
+					}
+					fp.LocaleCountry = countryFromMCC
+					needsUpdate = true
+				} else if countryFromMCC == "" && dynamicRegion != "" && fp.LocaleCountry != dynamicRegion {
+					// 如果无法从 MCC 推断国家，使用 dynamicRegion
+					if cli.Log != nil {
+						cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry with dynamicRegion: %s -> %s", fp.LocaleCountry, dynamicRegion)
+					}
+					fp.LocaleCountry = dynamicRegion
+					needsUpdate = true
+				}
 			} else {
 				// 2. 兜底策略：根据手机号段校准 MCC/MNC
 				// 注意：只在 MCC 为空或明显错误时才校准，避免覆盖已有效的 MCC/MNC
@@ -594,9 +651,41 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							}
 							fp.LocaleCountry = phoneInfo.RegionCode
 						}
+						// 标记需要更新数据库（手机号校准也会修改指纹）
+						needsUpdate = true
 					} else if cli.Log != nil {
 						cli.Log.Debugf("[Fingerprint] MCC/MNC calibration skipped for phone %s: MCC=%s, MNC=%s (already valid)", phone, fp.Mcc, fp.Mnc)
 					}
+				}
+			}
+
+			// 如果指纹有变化，更新数据库（避免旧指纹残留）
+			// 检查是否有实际变化（无论是否通过 carrierInfo 或手机号校准）
+			hasChanges := originalMCC != fp.Mcc || originalMNC != fp.Mnc || originalCountry != fp.LocaleCountry
+			if hasChanges {
+				// 如果 needsUpdate 为 false，说明是通过手机号校准修改的，也需要更新
+				if !needsUpdate {
+					needsUpdate = true
+				}
+			}
+			if needsUpdate && hasChanges {
+				// 确定要保存的 JID
+				saveJID := jid
+				if saveJID.IsEmpty() && cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
+					saveJID = cli.phoneLinkingCache.jid
+				}
+				if !saveJID.IsEmpty() {
+					// 复制指纹结构体，避免并发修改
+					fpCopy := *fp
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, saveJID, &fpCopy); saveErr != nil {
+							cli.Log.Warnf("[Fingerprint] Failed to update fingerprint in database for %s: %v", saveJID.User, saveErr)
+						} else {
+							cli.Log.Infof("[Fingerprint] Updated fingerprint in database for %s: MCC=%s-%s, Country=%s", saveJID.User, fpCopy.Mcc, fpCopy.Mnc, fpCopy.LocaleCountry)
+						}
+					}()
 				}
 			}
 
@@ -669,6 +758,10 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 			}
 
 			fingerprint.ApplyFingerprint(payload, fp, dynamicRegion)
+
+			// 最后的安全网：再次调用 sanitizeClientPayload 确保清理完整（流程闭环）
+			// 因为 ApplyFingerprint 可能会修改 payload，需要再次清理
+			payload = store.SanitizeClientPayload(payload)
 
 			// 记录应用指纹后的状态和关键修复
 			if cli.Log != nil {
