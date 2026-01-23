@@ -48,18 +48,16 @@ func LookupPhoneRegion(phone string) *PhoneRegionInfo {
 // lookupIndia 印度号段查找 (10位)
 func lookupIndia(num string) *PhoneRegionInfo {
 	if len(num) < 4 {
-		return &PhoneRegionInfo{RegionCode: "IN", MCC: "404", MNC: "01", OperatorName: "Airtel"}
+		return &PhoneRegionInfo{RegionCode: "IN", MCC: "404", MNC: "10", OperatorName: "Airtel"}
 	}
 
 	prefix4 := num[:4]
 	
-	// 简单映射逻辑（基于常用号段）
-	// Jio (MCC 405 主要，或 404-09)
-	if strings.HasPrefix(num, "70") || strings.HasPrefix(num, "79") || strings.HasPrefix(num, "6") || strings.HasPrefix(num, "8") {
-		return &PhoneRegionInfo{RegionCode: "IN", MCC: "405", MNC: "865", OperatorName: "Jio"}
-	}
-
-	// Airtel (404-02, 03, 10...)
+	// 精确映射逻辑（基于常用号段）
+	// 注意：号段匹配可能不够精确，因此只在 MCC 为空或明显错误时才使用此结果
+	// 优先匹配更精确的前缀，避免误判
+	
+	// Airtel (404-02, 03, 10...) - 使用精确前缀
 	airtelPrefixes := []string{"981", "987", "991", "997", "971"}
 	for _, p := range airtelPrefixes {
 		if strings.HasPrefix(num, p) {
@@ -80,9 +78,18 @@ func lookupIndia(num string) *PhoneRegionInfo {
 		return &PhoneRegionInfo{RegionCode: "IN", MCC: "404", MNC: "34", OperatorName: "BSNL"}
 	}
 
+	// Jio (MCC 405 主要) - 放在最后，因为前缀范围较广
+	// 使用较精确的前缀匹配，避免误判其他运营商
+	jioPrefixes := []string{"70", "79", "60", "61", "62", "63", "64", "65", "66", "67", "68", "69", "80", "81", "82", "83", "84", "85", "86", "87", "88", "89"}
+	for _, p := range jioPrefixes {
+		if strings.HasPrefix(num, p) {
+			return &PhoneRegionInfo{RegionCode: "IN", MCC: "405", MNC: "874", OperatorName: "Jio"}
+		}
+	}
+
 	// 默认返回印度通用
 	_ = prefix4
-	return &PhoneRegionInfo{RegionCode: "IN", MCC: "404", MNC: "01", OperatorName: "Airtel"}
+	return &PhoneRegionInfo{RegionCode: "IN", MCC: "404", MNC: "10", OperatorName: "Airtel"}
 }
 
 // lookupBrazil 巴西号段查找 (11位: AA 9NNNN-NNNN)
@@ -110,9 +117,9 @@ func lookupBrazil(num string) *PhoneRegionInfo {
 		return &PhoneRegionInfo{RegionCode: "BR", MCC: "724", MNC: "02", OperatorName: "TIM"}
 	}
 
-	// Oi (724-14, 15)
+	// Oi (724-30, 31)
 	if series == "80" || series == "88" || series == "89" {
-		return &PhoneRegionInfo{RegionCode: "BR", MCC: "724", MNC: "16", OperatorName: "Oi"}
+		return &PhoneRegionInfo{RegionCode: "BR", MCC: "724", MNC: "31", OperatorName: "Oi"}
 	}
 
 	// 默认返回巴西通用

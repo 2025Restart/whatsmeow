@@ -26,9 +26,24 @@ func GetRegionByPhone(phone string) string {
 }
 
 // ApplyFingerprint 应用设备指纹到 ClientPayload
-func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint) {
+// regionCode: 可选，地区代码（如 "IN", "BR"），用于设置兜底的 LocaleCountry 和 MCC/MNC
+func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint, regionCode ...string) {
 	if payload == nil {
 		return
+	}
+
+	// 确定使用的地区代码（优先使用传入的，否则从指纹中推断）
+	var effectiveRegionCode string
+	if len(regionCode) > 0 && regionCode[0] != "" {
+		effectiveRegionCode = regionCode[0]
+	} else if fp != nil && fp.LocaleCountry != "" {
+		effectiveRegionCode = fp.LocaleCountry
+	}
+
+	// 获取地区配置（用于兜底值）
+	var regionConfig *RegionConfig
+	if effectiveRegionCode != "" {
+		regionConfig = GetRegionConfig(effectiveRegionCode)
 	}
 
 	// 即使指纹为空，也检查并覆盖非官方标识（三重保障）
@@ -59,8 +74,45 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 		}
 	}
 
-	// 如果指纹为空，直接返回（已处理非官方标识）
+	// 如果指纹为空，仍然需要设置必填字段的兜底值（根据地区配置）
 	if fp == nil {
+		// 确保 UserAgent 存在
+		if payload.UserAgent == nil {
+			payload.UserAgent = &waWa6.ClientPayload_UserAgent{}
+		}
+
+		// 根据地区配置设置兜底值，避免 sanitizeClientPayload 硬编码为印度
+		if effectiveRegionCode != "" && regionConfig != nil {
+			// 设置 LocaleCountry
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
+				payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(effectiveRegionCode)
+			}
+
+			// 设置 MCC/MNC（使用地区配置的第一个）
+			if len(regionConfig.MobileNetworks) > 0 {
+				if payload.UserAgent.Mcc == nil {
+					payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+				}
+				if payload.UserAgent.Mnc == nil {
+					payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+				}
+			}
+
+			// 设置语言（使用地区配置的第一个语言）
+			if len(regionConfig.Languages) > 0 && payload.UserAgent.LocaleLanguageIso6391 == nil {
+				payload.UserAgent.LocaleLanguageIso6391 = proto.String(regionConfig.Languages[0].Code)
+			}
+		}
+
+		// 确保 WEB 平台特征正确
+		if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
+			payload.UserAgent.OsBuildNumber = nil
+			payload.UserAgent.DeviceBoard = nil
+			if payload.UserAgent.Device == nil {
+				payload.UserAgent.Device = proto.String("Desktop")
+			}
+		}
+
 		return
 	}
 
@@ -92,76 +144,319 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 		payload.UserAgent.DeviceType = fp.DeviceType
 	}
 
-	// 2. 强制地区特征对齐 (IN/BR 专项)
+	// 确保必填字段不为空（兜底逻辑）
+	if payload.UserAgent.OsVersion == nil || payload.UserAgent.GetOsVersion() == "" {
+		if fp.OsVersion != "" {
+			payload.UserAgent.OsVersion = proto.String(fp.OsVersion)
+		} else {
+			payload.UserAgent.OsVersion = proto.String("10.0.0") // 默认值
+		}
+	}
+	if payload.UserAgent.Manufacturer == nil || payload.UserAgent.GetManufacturer() == "" || payload.UserAgent.GetManufacturer() == "Unknown" {
+		if fp.Manufacturer != "" {
+			payload.UserAgent.Manufacturer = proto.String(fp.Manufacturer)
+		} else {
+			payload.UserAgent.Manufacturer = proto.String("Microsoft") // 默认值
+		}
+	}
+	if payload.UserAgent.Device == nil || payload.UserAgent.GetDevice() == "" {
+		if fp.Device != "" {
+			payload.UserAgent.Device = proto.String(fp.Device)
+		} else {
+			payload.UserAgent.Device = proto.String("Desktop") // 默认值
+		}
+	}
+
+	// 2. 强制地区特征对齐（根据配置的地区设置兜底值）
 	if fp.LocaleLanguage != "" {
 		payload.UserAgent.LocaleLanguageIso6391 = proto.String(fp.LocaleLanguage)
+	} else if payload.UserAgent.LocaleLanguageIso6391 == nil {
+		// 兜底：使用地区配置的第一个语言
+		if regionConfig != nil && len(regionConfig.Languages) > 0 {
+			payload.UserAgent.LocaleLanguageIso6391 = proto.String(regionConfig.Languages[0].Code)
+		} else {
+			payload.UserAgent.LocaleLanguageIso6391 = proto.String("en") // 默认值
+		}
 	}
+
+	// 根据配置的地区设置兜底的 LocaleCountry 和 MCC/MNC
+	// 优先级：指纹中的值 > 地区配置的默认值 > MCC 推断
+	// 如果 LocaleCountry 为空，使用地区配置的默认值
+	if fp.LocaleCountry == "" && effectiveRegionCode != "" {
+		fp.LocaleCountry = effectiveRegionCode
+	}
+
+	// MCC/MNC 相互推断逻辑
+	// 1. 如果只有 MCC，推断 MNC
+	if fp.Mcc != "" && fp.Mnc == "" {
+		// 优先使用地区配置的 MNC
+		if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+			// 找到匹配的 MCC
+			for _, net := range regionConfig.MobileNetworks {
+				if net.MCC == fp.Mcc {
+					fp.Mnc = net.MNC
+					break
+				}
+			}
+		}
+		// 如果还没找到，使用查找表推断
+		if fp.Mnc == "" {
+			fp.Mnc = InferMNCFromMCC(fp.Mcc)
+		}
+	}
+
+	// 2. 如果只有 MNC，推断 MCC（需要国家代码）
+	if fp.Mnc != "" && fp.Mcc == "" {
+		countryForInference := fp.LocaleCountry
+		if countryForInference == "" && effectiveRegionCode != "" {
+			countryForInference = effectiveRegionCode
+		}
+		if countryForInference != "" {
+			fp.Mcc = InferMCCFromMNC(fp.Mnc, countryForInference)
+		}
+		// 如果还是没找到，使用地区配置
+		if fp.Mcc == "" && regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+			// 找到匹配的 MNC
+			for _, net := range regionConfig.MobileNetworks {
+				if net.MNC == fp.Mnc {
+					fp.Mcc = net.MCC
+					break
+				}
+			}
+		}
+	}
+
+	// 3. 如果 MCC 为空，使用地区配置的默认 MCC/MNC
+	if fp.Mcc == "" && regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+		fp.Mcc = regionConfig.MobileNetworks[0].MCC
+		if fp.Mnc == "" {
+			fp.Mnc = regionConfig.MobileNetworks[0].MNC
+		}
+	}
+
+	// 4. 验证 MCC/MNC 组合有效性
+	if fp.Mcc != "" && fp.Mnc != "" {
+		if !ValidateMCCMNC(fp.Mcc, fp.Mnc) {
+			// 如果组合无效，尝试修正
+			if inferredMNC := InferMNCFromMCC(fp.Mcc); inferredMNC != "" {
+				fp.Mnc = inferredMNC
+			} else if fp.LocaleCountry != "" {
+				if inferredMCC := InferMCCFromMNC(fp.Mnc, fp.LocaleCountry); inferredMCC != "" {
+					fp.Mcc = inferredMCC
+				}
+			}
+		}
+	}
+
+	// 5. 如果 MCC 有值但 LocaleCountry 为空或不一致，根据 MCC 推断
+	// 确保 MCC 和 LocaleCountry 始终保持一致（避免 rva/frc 封控）
+	if fp.Mcc != "" && (fp.LocaleCountry == "" || !isMCCCountryMatch(fp.Mcc, fp.LocaleCountry)) {
+		inferredCountry := getCountryByMCC(fp.Mcc)
+		if inferredCountry != "" {
+			oldCountry := fp.LocaleCountry
+			fp.LocaleCountry = inferredCountry
+			if oldCountry != "" && oldCountry != inferredCountry {
+				// 记录同步日志（用于调试）
+				// 注意：这里没有 logger，如果需要日志，应该在调用方添加
+			}
+		}
+	}
+
+	// 设置 LocaleCountry 和 MCC/MNC（根据指纹或地区配置）
 	if fp.LocaleCountry != "" {
 		payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(fp.LocaleCountry)
-
-		// 针对特定国家强制修正 MCC/MNC，解决 odn 报错
 		countryCode := fp.LocaleCountry
 		switch countryCode {
 		case "IN":
 			// 印度：确保 MCC 为 404 或 405
-			if fp.Mcc == "" || !strings.HasPrefix(fp.Mcc, "40") {
+			if fp.Mcc == "" || (fp.Mcc != "404" && fp.Mcc != "405") {
 				payload.UserAgent.Mcc = proto.String("404")
-				payload.UserAgent.Mnc = proto.String("01")
-			} else if fp.Mcc != "" {
-				// 如果指纹中有有效的 MCC（以 40 开头），直接应用
+				// 使用推断函数获取常见的 MNC
+				if inferredMNC := InferMNCFromMCC("404"); inferredMNC != "" {
+					payload.UserAgent.Mnc = proto.String(inferredMNC)
+				} else {
+					payload.UserAgent.Mnc = proto.String("01")
+				}
+			} else {
 				payload.UserAgent.Mcc = proto.String(fp.Mcc)
 				if fp.Mnc != "" {
 					payload.UserAgent.Mnc = proto.String(fp.Mnc)
 				} else {
-					payload.UserAgent.Mnc = proto.String("01")
+					// 使用推断函数
+					if inferredMNC := InferMNCFromMCC(fp.Mcc); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
 				}
 			}
 		case "BR":
 			// 巴西：确保 MCC 为 724
 			if fp.Mcc == "" || fp.Mcc != "724" {
 				payload.UserAgent.Mcc = proto.String("724")
-				payload.UserAgent.Mnc = proto.String("02")
-			} else if fp.Mcc == "724" {
-				// 如果指纹中的 MCC 正确，应用指纹的 MNC
+				// 使用推断函数获取常见的 MNC
+				if inferredMNC := InferMNCFromMCC("724"); inferredMNC != "" {
+					payload.UserAgent.Mnc = proto.String(inferredMNC)
+				} else {
+					payload.UserAgent.Mnc = proto.String("02")
+				}
+			} else {
 				payload.UserAgent.Mcc = proto.String(fp.Mcc)
 				if fp.Mnc != "" {
 					payload.UserAgent.Mnc = proto.String(fp.Mnc)
 				} else {
-					payload.UserAgent.Mnc = proto.String("02")
+					// 使用推断函数
+					if inferredMNC := InferMNCFromMCC(fp.Mcc); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("02")
+					}
+				}
+			}
+		default:
+			// 其他国家：直接应用指纹的 MCC/MNC
+			if fp.Mcc != "" {
+				payload.UserAgent.Mcc = proto.String(fp.Mcc)
+			}
+			if fp.Mnc != "" {
+				payload.UserAgent.Mnc = proto.String(fp.Mnc)
+			}
+		}
+	} else if effectiveRegionCode != "" {
+		// 如果 LocaleCountry 为空，使用地区配置
+		payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(effectiveRegionCode)
+		// 根据地区设置 MCC/MNC
+		if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+			payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+			payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+		} else {
+			// 根据地区推断
+			switch effectiveRegionCode {
+			case "IN":
+				payload.UserAgent.Mcc = proto.String("404")
+				payload.UserAgent.Mnc = proto.String("01")
+			case "BR":
+				payload.UserAgent.Mcc = proto.String("724")
+				payload.UserAgent.Mnc = proto.String("02")
+			}
+		}
+	}
+
+	// 最终兜底：确保 MCC/MNC 和 LocaleCountry 都被设置
+	if payload.UserAgent.Mcc == nil || payload.UserAgent.Mnc == nil {
+		if regionConfig != nil && len(regionConfig.MobileNetworks) > 0 {
+			if payload.UserAgent.Mcc == nil {
+				payload.UserAgent.Mcc = proto.String(regionConfig.MobileNetworks[0].MCC)
+			}
+			if payload.UserAgent.Mnc == nil {
+				// 如果 MCC 已设置，尝试推断 MNC
+				if payload.UserAgent.Mcc != nil {
+					if inferredMNC := InferMNCFromMCC(payload.UserAgent.GetMcc()); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+					}
+				} else {
+					payload.UserAgent.Mnc = proto.String(regionConfig.MobileNetworks[0].MNC)
+				}
+			}
+		} else if effectiveRegionCode != "" {
+			switch effectiveRegionCode {
+			case "IN":
+				if payload.UserAgent.Mcc == nil {
+					payload.UserAgent.Mcc = proto.String("404")
+				}
+				if payload.UserAgent.Mnc == nil {
+					if inferredMNC := InferMNCFromMCC(payload.UserAgent.GetMcc()); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
+				}
+			case "BR":
+				if payload.UserAgent.Mcc == nil {
+					payload.UserAgent.Mcc = proto.String("724")
+				}
+				if payload.UserAgent.Mnc == nil {
+					if inferredMNC := InferMNCFromMCC(payload.UserAgent.GetMcc()); inferredMNC != "" {
+						payload.UserAgent.Mnc = proto.String(inferredMNC)
+					} else {
+						payload.UserAgent.Mnc = proto.String("02")
+					}
 				}
 			}
 		}
 	}
 
-	// 如果上面开关没命中，但指纹里有 MCC，则应用指纹的（覆盖已设置的值）
-	// 注意：对于 IN/BR 国家，如果上面 switch 已经处理了，这里不会再次设置
-	// 对于其他国家，或者上面 switch 未处理的情况，直接应用指纹的 MCC/MNC
-	if fp.Mcc != "" && (fp.LocaleCountry == "" || (fp.LocaleCountry != "IN" && fp.LocaleCountry != "BR")) {
-		payload.UserAgent.Mcc = proto.String(fp.Mcc)
+	// 如果只有 MCC 或只有 MNC，使用推断函数补充
+	if payload.UserAgent.Mcc != nil && payload.UserAgent.Mnc == nil {
+		if inferredMNC := InferMNCFromMCC(payload.UserAgent.GetMcc()); inferredMNC != "" {
+			payload.UserAgent.Mnc = proto.String(inferredMNC)
+		}
 	}
-	if fp.Mnc != "" && (fp.LocaleCountry == "" || (fp.LocaleCountry != "IN" && fp.LocaleCountry != "BR")) {
-		payload.UserAgent.Mnc = proto.String(fp.Mnc)
+	if payload.UserAgent.Mnc != nil && payload.UserAgent.Mcc == nil {
+		countryForInference := ""
+		if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+			countryForInference = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+		} else if effectiveRegionCode != "" {
+			countryForInference = effectiveRegionCode
+		}
+		if countryForInference != "" {
+			if inferredMCC := InferMCCFromMNC(payload.UserAgent.GetMnc(), countryForInference); inferredMCC != "" {
+				payload.UserAgent.Mcc = proto.String(inferredMCC)
+			}
+		}
+	}
+
+	if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
+		if payload.UserAgent.Mcc != nil {
+			inferredCountry := getCountryByMCC(payload.UserAgent.GetMcc())
+			if inferredCountry != "" {
+				payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(inferredCountry)
+			} else if effectiveRegionCode != "" {
+				payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(effectiveRegionCode)
+			}
+		} else if effectiveRegionCode != "" {
+			payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String(effectiveRegionCode)
+		}
 	}
 
 	// 3. WEB 平台特征深度清洗 (解决 vll 报错)
 	isWeb := payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB
 	if isWeb {
-		// 强制清理移动端残留字段
+		// 强制清理移动端残留字段（彻底清理，避免 vll 封控）
 		payload.UserAgent.OsBuildNumber = nil
 		payload.UserAgent.DeviceBoard = nil
+		payload.UserAgent.DeviceModelType = nil // 移动端字段
 
 		// 强制对齐桌面特征
 		payload.UserAgent.Device = proto.String("Desktop")
+
+		// 确保 Platform 是 WEB
+		if payload.UserAgent.Platform == nil {
+			payload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
+		}
 
 		// 针对 Windows/macOS 强制设置通用制造商
 		osName := ""
 		if fp.DevicePropsOs != "" {
 			osName = strings.ToLower(fp.DevicePropsOs)
+		} else if payload.UserAgent.OsVersion != nil {
+			// 从 OsVersion 推断
+			osVer := strings.ToLower(payload.UserAgent.GetOsVersion())
+			if strings.Contains(osVer, "windows") || strings.Contains(osVer, "10") || strings.Contains(osVer, "11") {
+				osName = "windows"
+			} else if strings.Contains(osVer, "mac") {
+				osName = "mac"
+			}
 		}
 		if strings.Contains(osName, "windows") {
 			payload.UserAgent.Manufacturer = proto.String("Microsoft")
 		} else if strings.Contains(osName, "mac") {
 			payload.UserAgent.Manufacturer = proto.String("Apple")
+		} else if payload.UserAgent.Manufacturer == nil || *payload.UserAgent.Manufacturer == "Unknown" {
+			// 兜底：默认 Microsoft（Windows）
+			payload.UserAgent.Manufacturer = proto.String("Microsoft")
 		}
 	} else {
 		// 非 WEB 平台保留原有逻辑
@@ -170,6 +465,9 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 		}
 		if fp.DeviceBoard != "" {
 			payload.UserAgent.DeviceBoard = proto.String(fp.DeviceBoard)
+		}
+		if fp.DeviceModelType != "" {
+			payload.UserAgent.DeviceModelType = proto.String(fp.DeviceModelType)
 		}
 	}
 
@@ -239,6 +537,35 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint)
 			payload.DevicePairingData.DeviceProps = devicePropsBytes
 		}
 	}
+
+	// 5. 确保 WebInfo 正确设置（避免 lla 封控）
+	if payload.WebInfo == nil {
+		payload.WebInfo = &waWa6.ClientPayload_WebInfo{
+			WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum(),
+		}
+	} else if payload.WebInfo.WebSubPlatform == nil {
+		// 确保 WebSubPlatform 不为空
+		payload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()
+	}
+
+	// 6. 最终验证：确保所有必填字段都已设置（避免 atn/cln/lla/vll 封控）
+	if payload.UserAgent != nil {
+		// 确保 Platform 正确设置
+		if payload.UserAgent.Platform == nil {
+			payload.UserAgent.Platform = waWa6.ClientPayload_UserAgent_WEB.Enum()
+		}
+
+		// 确保 ReleaseChannel 设置
+		if payload.UserAgent.ReleaseChannel == nil {
+			payload.UserAgent.ReleaseChannel = waWa6.ClientPayload_UserAgent_RELEASE.Enum()
+		}
+
+		// 确保 AppVersion 设置
+		if payload.UserAgent.AppVersion == nil {
+			payload.UserAgent.AppVersion = store.GetWAVersion().ProtoAppVersion()
+		}
+	}
+
 }
 
 // inferPlatformTypeFromOs 根据 DeviceProps.Os 的内容推断 PlatformType
@@ -266,4 +593,28 @@ func inferPlatformTypeFromOs(osValue string) *waCompanionReg.DeviceProps_Platfor
 
 	// 默认返回 Chrome（因为大多数 Web 平台使用 Chrome）
 	return waCompanionReg.DeviceProps_CHROME.Enum()
+}
+
+// getCountryByMCC 根据 MCC 返回对应的国家代码
+func getCountryByMCC(mcc string) string {
+	switch mcc {
+	case "404", "405":
+		return "IN"
+	case "724":
+		return "BR"
+	default:
+		return ""
+	}
+}
+
+// isMCCCountryMatch 检查 MCC 是否与国家代码匹配
+func isMCCCountryMatch(mcc, countryCode string) bool {
+	switch countryCode {
+	case "IN":
+		return mcc == "404" || mcc == "405"
+	case "BR":
+		return mcc == "724"
+	default:
+		return false
+	}
 }

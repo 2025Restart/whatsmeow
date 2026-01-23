@@ -14,6 +14,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"go.mau.fi/libsignal/ecc"
 	"google.golang.org/protobuf/proto"
@@ -243,8 +244,12 @@ func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, r
 				cli.Log.Infof("[Fingerprint] Migrating fingerprint to JID %s (fingerprint: %s %s, MCC: %s, MNC: %s)",
 					jid.User, pendingFP.Manufacturer, pendingFP.Device, pendingFP.Mcc, pendingFP.Mnc)
 			}
+			// 复制指纹结构体，避免并发修改
+			fpCopy := *pendingFP
 			go func() {
-				if saveErr := container.PutFingerprint(context.Background(), jid, pendingFP); saveErr != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
 					cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint after pairing for %s: %v", jid.User, saveErr)
 				} else {
 					cli.Log.Infof("[Fingerprint] Successfully migrated temporary fingerprint to JID %s after pairing", jid.User)

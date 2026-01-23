@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
+	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 )
@@ -307,15 +308,72 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 	headers.Set("Cache-Control", "no-cache")
 	headers.Set("Pragma", "no-cache")
 
-	// 注入现代浏览器 Client Hints (解决 cln/cco 报错)
-	payload := cli.Store.GetClientPayload()
+	// 注入现代浏览器 Client Hints (解决 cln/cco/atn 报错)
+	// 确保获取最新的 Payload（如果 GetClientPayload 已设置，使用它以确保一致性）
+	var payload *waWa6.ClientPayload
+	if cli.GetClientPayload != nil {
+		payload = cli.GetClientPayload()
+	} else {
+		payload = cli.Store.GetClientPayload()
+	}
 	if payload != nil && payload.UserAgent != nil {
 		osName := "Windows"
 		if payload.UserAgent.GetManufacturer() == "Apple" {
 			osName = "macOS"
+		} else if payload.UserAgent.GetManufacturer() == "Microsoft" {
+			osName = "Windows"
 		}
+		
+		// 确保 Client Hints 格式正确（避免 atn/cln 封控）
 		headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
-		headers.Set("Sec-Ch-Ua-Mobile", "?0") // ⚠️ 强制锁定为 PC 端
+		headers.Set("Sec-Ch-Ua-Mobile", "?0") // 强制锁定为 PC 端
 		headers.Set("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		
+		// 记录 Client Hints 设置（用于验证）
+		if cli.Log != nil {
+			cli.Log.Debugf("[Fingerprint] Set Client Hints: Platform=%s, Mobile=?0, UA=Chrome/131, MCC=%s, MNC=%s", 
+				osName, payload.UserAgent.GetMcc(), payload.UserAgent.GetMnc())
+			
+			// 验证 WEB 平台特征一致性（避免 vll/lla/atn/cln 封控）
+			if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
+				issues := []string{}
+				if payload.UserAgent.OsBuildNumber != nil {
+					issues = append(issues, fmt.Sprintf("OsBuildNumber=%s (should be nil)", payload.UserAgent.GetOsBuildNumber()))
+				}
+				if payload.UserAgent.DeviceBoard != nil {
+					issues = append(issues, fmt.Sprintf("DeviceBoard=%s (should be nil)", payload.UserAgent.GetDeviceBoard()))
+				}
+				if payload.UserAgent.DeviceModelType != nil {
+					issues = append(issues, fmt.Sprintf("DeviceModelType=%s (should be nil)", payload.UserAgent.GetDeviceModelType()))
+				}
+				if payload.UserAgent.GetDevice() != "Desktop" {
+					issues = append(issues, fmt.Sprintf("Device=%s (should be Desktop)", payload.UserAgent.GetDevice()))
+				}
+				if len(issues) > 0 {
+					cli.Log.Warnf("[Fingerprint] WEB platform validation issues: %v", issues)
+				}
+			}
+		}
+		
+		// 确保 WebInfo 存在（避免 lla 封控）
+		if payload.WebInfo == nil {
+			// WebInfo 应该在 BaseClientPayload 中已设置，但如果缺失则记录警告
+			// 这里不设置，因为应该在 ApplyFingerprint 中处理
+			if cli.Log != nil {
+				cli.Log.Warnf("[Fingerprint] WebInfo is nil in payload, should be set by ApplyFingerprint")
+			}
+		} else if payload.WebInfo.WebSubPlatform == nil {
+			if cli.Log != nil {
+				cli.Log.Warnf("[Fingerprint] WebInfo.WebSubPlatform is nil, should be set by ApplyFingerprint")
+			}
+		}
+	} else {
+		// 如果 payload 为空，使用默认值
+		headers.Set("Sec-Ch-Ua-Platform", "\"Windows\"")
+		headers.Set("Sec-Ch-Ua-Mobile", "?0")
+		headers.Set("Sec-Ch-Ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"")
+		if cli.Log != nil {
+			cli.Log.Debugf("[Fingerprint] Set default Client Hints (payload is nil)")
+		}
 	}
 }

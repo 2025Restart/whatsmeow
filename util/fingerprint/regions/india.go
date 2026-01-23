@@ -55,19 +55,18 @@ func init() {
 
 		MobileNetworks: []fingerprint.MobileNetworkConfig{
 			// MCC 404 (主要GSM网络)
-			{MCC: "404", MNC: "01", OperatorName: "Airtel", Weight: 0.20},
-			{MCC: "404", MNC: "07", OperatorName: "Jio", Weight: 0.25},
+			{MCC: "404", MNC: "01", OperatorName: "Vi (Vodafone Idea)", Weight: 0.20},
 			{MCC: "404", MNC: "20", OperatorName: "Vodafone Idea", Weight: 0.15},
+			{MCC: "404", MNC: "10", OperatorName: "Airtel", Weight: 0.10},
 			{MCC: "404", MNC: "11", OperatorName: "BSNL", Weight: 0.10},
-			{MCC: "404", MNC: "10", OperatorName: "Airtel", Weight: 0.04},
 			{MCC: "404", MNC: "22", OperatorName: "Vodafone Idea", Weight: 0.03},
 			{MCC: "404", MNC: "27", OperatorName: "Vodafone Idea", Weight: 0.02},
 			{MCC: "404", MNC: "15", OperatorName: "BSNL", Weight: 0.02},
 			{MCC: "404", MNC: "45", OperatorName: "Airtel", Weight: 0.01},
-			// MCC 405 (CDMA/LTE网络) - 启用 Jio 的 LTE 网络配置
-			{MCC: "405", MNC: "799", OperatorName: "Jio", Weight: 0.10},
-			{MCC: "405", MNC: "800", OperatorName: "Jio", Weight: 0.02},
-			{MCC: "405", MNC: "801", OperatorName: "Jio", Weight: 0.01},
+			// MCC 405 (CDMA/LTE网络) - Jio 的 LTE 网络配置（有效 MNC: 840, 854-874）
+			{MCC: "405", MNC: "874", OperatorName: "Jio", Weight: 0.10},
+			{MCC: "405", MNC: "865", OperatorName: "Jio", Weight: 0.02},
+			{MCC: "405", MNC: "857", OperatorName: "Jio", Weight: 0.01},
 		},
 
 		DeviceModels: map[string][]fingerprint.DeviceModelConfig{

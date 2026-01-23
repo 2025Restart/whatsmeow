@@ -137,11 +137,11 @@ type Client struct {
 
 	privacySettingsCache atomic.Value
 
-	groupCache              map[types.JID]*groupMetaCache
-	groupCacheLock          sync.Mutex
-	userDevicesCache        map[types.JID]deviceCache
-	userDevicesCacheLock    sync.Mutex
-	pendingDeviceQueries    map[types.JID]struct{}
+	groupCache               map[types.JID]*groupMetaCache
+	groupCacheLock           sync.Mutex
+	userDevicesCache         map[types.JID]deviceCache
+	userDevicesCacheLock     sync.Mutex
+	pendingDeviceQueries     map[types.JID]struct{}
 	pendingDeviceQueriesLock sync.Mutex
 
 	recentMessagesMap  map[recentMessageKey]RecentMessage
@@ -153,8 +153,8 @@ type Client struct {
 	sessionRecreateHistoryLock sync.Mutex
 
 	// pendingFingerprint 存储配对阶段生成的临时指纹，配对成功后保存到数据库
-	pendingFingerprint     *store.DeviceFingerprint
-	pendingFingerprintLock sync.RWMutex // 使用 RWMutex 提高并发性能
+	pendingFingerprint      *store.DeviceFingerprint
+	pendingFingerprintLock  sync.RWMutex // 使用 RWMutex 提高并发性能
 	pendingFingerprintSaved atomic.Bool  // 标记是否已保存到数据库（避免重复保存）
 
 	// GetMessageForRetry is used to find the source message for handling retry receipts
@@ -413,8 +413,12 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 						if cli.Log != nil {
 							cli.Log.Infof("[Fingerprint] Saving temporary fingerprint to database for %s (atomic operation)", tempJID.User)
 						}
+						// 复制指纹结构体，避免并发修改
+						fpCopy := *fp
 						go func() {
-							if saveErr := container.PutFingerprint(context.Background(), tempJID, fp); saveErr != nil {
+							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer cancel()
+							if saveErr := container.PutFingerprint(ctx, tempJID, &fpCopy); saveErr != nil {
 								cli.Log.Warnf("[Fingerprint] Failed to save temporary fingerprint for %s: %v", tempJID.User, saveErr)
 								cli.pendingFingerprintSaved.Store(false) // 保存失败，重置标记
 							} else {
@@ -455,9 +459,13 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 					if cli.Log != nil {
 						cli.Log.Infof("[Fingerprint] Using pending fingerprint for %s (database read failed)", jid.User)
 					}
+					// 复制指纹结构体，避免并发修改
+					fpCopy := *fp
 					// 保存临时指纹到数据库（使用原子操作避免重复保存）
 					go func() {
-						if saveErr := container.PutFingerprint(context.Background(), jid, fp); saveErr != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
 							cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
 						} else {
 							cli.Log.Infof("[Fingerprint] Saved pending fingerprint for %s (recovered from memory)", jid.User)
@@ -486,9 +494,13 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 					if cli.Log != nil {
 						cli.Log.Infof("[Fingerprint] Using pending fingerprint for %s (migrating to database)", jid.User)
 					}
+					// 复制指纹结构体，避免并发修改
+					fpCopy := *fp
 					// 保存临时指纹到数据库（使用原子操作避免重复保存）
 					go func() {
-						if saveErr := container.PutFingerprint(context.Background(), jid, fp); saveErr != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
 							cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
 						} else {
 							cli.Log.Infof("[Fingerprint] Successfully migrated pending fingerprint for %s to database", jid.User)
@@ -508,8 +520,12 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							jid.User, dynamicRegion, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
 							fp.Mcc, fp.Mnc, fp.LocaleLanguage)
 					}
+					// 复制指纹结构体，避免并发修改
+					fpCopy := *fp
 					go func() {
-						if saveErr := container.PutFingerprint(context.Background(), jid, fp); saveErr != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
 							cli.Log.Warnf("[Fingerprint] Failed to save new fingerprint for %s: %v", jid.User, saveErr)
 						} else {
 							cli.Log.Infof("[Fingerprint] Successfully saved new fingerprint for %s", jid.User)
@@ -547,20 +563,279 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 				fp.Mnc = carrierInfo.MNC
 			} else {
 				// 2. 兜底策略：根据手机号段校准 MCC/MNC
+				// 注意：只在 MCC 为空或明显错误时才校准，避免覆盖已有效的 MCC/MNC
 				if phoneInfo := fingerprint.LookupPhoneRegion(phone); phoneInfo != nil {
-					// 如果指纹中的 MCC 为空，或者与号段标识的 MCC 不符，执行强制修正
-					if fp.Mcc == "" || fp.Mcc != phoneInfo.MCC || (fp.Mcc == "404" && phoneInfo.MCC == "405") || (fp.Mcc == "405" && phoneInfo.MCC == "404") {
+					// 只在以下情况校准：
+					// 1. MCC 为空
+					// 2. MCC 不是印度/巴西的有效值（404/405/724）
+					// 3. MCC 与号段完全不匹配（且不是 404/405 互换的情况）
+					shouldCalibrate := fp.Mcc == "" ||
+						(fp.LocaleCountry == "IN" && fp.Mcc != "404" && fp.Mcc != "405") ||
+						(fp.LocaleCountry == "BR" && fp.Mcc != "724")
+
+					// 对于印度，如果 MCC 已经是 404 或 405，且号段匹配也返回 404/405，则不强制覆盖
+					if fp.LocaleCountry == "IN" && (fp.Mcc == "404" || fp.Mcc == "405") {
+						if phoneInfo.MCC == "404" || phoneInfo.MCC == "405" {
+							shouldCalibrate = false // 保持现有值，避免不必要的覆盖
+						}
+					}
+
+					if shouldCalibrate {
 						if cli.Log != nil && (fp.Mcc != phoneInfo.MCC || fp.Mnc != phoneInfo.MNC) {
 							cli.Log.Debugf("[Fingerprint] Calibrating MCC/MNC for phone %s (fallback): %s-%s -> %s-%s (%s)",
 								phone, fp.Mcc, fp.Mnc, phoneInfo.MCC, phoneInfo.MNC, phoneInfo.OperatorName)
 						}
 						fp.Mcc = phoneInfo.MCC
 						fp.Mnc = phoneInfo.MNC
+						// 同步更新 LocaleCountry，确保与 MCC/MNC 一致
+						if phoneInfo.RegionCode != "" && fp.LocaleCountry != phoneInfo.RegionCode {
+							if cli.Log != nil {
+								cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry: %s -> %s (based on MCC %s)", fp.LocaleCountry, phoneInfo.RegionCode, phoneInfo.MCC)
+							}
+							fp.LocaleCountry = phoneInfo.RegionCode
+						}
+					} else if cli.Log != nil {
+						cli.Log.Debugf("[Fingerprint] MCC/MNC calibration skipped for phone %s: MCC=%s, MNC=%s (already valid)", phone, fp.Mcc, fp.Mnc)
 					}
 				}
 			}
-			
-			fingerprint.ApplyFingerprint(payload, fp)
+
+			// MCC/MNC 推断日志
+			if cli.Log != nil {
+				beforeMCC := fp.Mcc
+				beforeMNC := fp.Mnc
+				needsInference := (fp.Mcc != "" && fp.Mnc == "") || (fp.Mcc == "" && fp.Mnc != "")
+
+				if needsInference {
+					if fp.Mcc != "" && fp.Mnc == "" {
+						inferredMNC := fingerprint.InferMNCFromMCC(fp.Mcc)
+						if inferredMNC != "" {
+							cli.Log.Debugf("[Fingerprint] Inferring MNC from MCC: MCC=%s -> MNC=%s", fp.Mcc, inferredMNC)
+						}
+					} else if fp.Mnc != "" && fp.Mcc == "" {
+						countryForInference := fp.LocaleCountry
+						if countryForInference == "" {
+							countryForInference = dynamicRegion
+						}
+						if countryForInference != "" {
+							inferredMCC := fingerprint.InferMCCFromMNC(fp.Mnc, countryForInference)
+							if inferredMCC != "" {
+								cli.Log.Debugf("[Fingerprint] Inferring MCC from MNC: MNC=%s, Country=%s -> MCC=%s", fp.Mnc, countryForInference, inferredMCC)
+							}
+						}
+					}
+				}
+
+				// 验证 MCC/MNC 组合
+				if fp.Mcc != "" && fp.Mnc != "" {
+					isValid := fingerprint.ValidateMCCMNC(fp.Mcc, fp.Mnc)
+					if !isValid {
+						cli.Log.Warnf("[Fingerprint] Invalid MCC/MNC combination: %s-%s, will be corrected during ApplyFingerprint", fp.Mcc, fp.Mnc)
+					} else if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
+						cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
+					}
+				}
+			}
+
+			// 记录应用指纹前的状态
+			var beforeMCC, beforeMNC, beforeCountry, beforeLanguage, beforePlatform string
+			var beforeWebInfo bool
+			if cli.Log != nil {
+				if payload.UserAgent != nil {
+					if payload.UserAgent.Mcc != nil {
+						beforeMCC = payload.UserAgent.GetMcc()
+					}
+					if payload.UserAgent.Mnc != nil {
+						beforeMNC = payload.UserAgent.GetMnc()
+					}
+					if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+						beforeCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+					}
+					if payload.UserAgent.LocaleLanguageIso6391 != nil {
+						beforeLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
+					}
+					if payload.UserAgent.Platform != nil {
+						beforePlatform = payload.UserAgent.Platform.String()
+					}
+				}
+				if payload.WebInfo != nil {
+					beforeWebInfo = true
+				}
+
+				cli.Log.Debugf("[Fingerprint] Before ApplyFingerprint: MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, WebInfo=%v, Region=%s",
+					beforeMCC, beforeMNC, beforeCountry, beforeLanguage, beforePlatform, beforeWebInfo, dynamicRegion)
+				cli.Log.Debugf("[Fingerprint] Fingerprint data: MCC=%s, MNC=%s, Country=%s, Language=%s, Device=%s, OS=%s",
+					fp.Mcc, fp.Mnc, fp.LocaleCountry, fp.LocaleLanguage, fp.Device, fp.DevicePropsOs)
+			}
+
+			fingerprint.ApplyFingerprint(payload, fp, dynamicRegion)
+
+			// 记录应用指纹后的状态和关键修复
+			if cli.Log != nil {
+				afterMCC := ""
+				afterMNC := ""
+				afterCountry := ""
+				afterLanguage := ""
+				afterPlatform := ""
+				afterWebInfo := false
+				afterWebSubPlatform := ""
+				afterDevice := ""
+				afterManufacturer := ""
+				afterOsVersion := ""
+				cleanedFields := []string{}
+
+				if payload.UserAgent != nil {
+					if payload.UserAgent.Mcc != nil {
+						afterMCC = payload.UserAgent.GetMcc()
+					}
+					if payload.UserAgent.Mnc != nil {
+						afterMNC = payload.UserAgent.GetMnc()
+					}
+					if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+						afterCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+					}
+					if payload.UserAgent.LocaleLanguageIso6391 != nil {
+						afterLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
+					}
+					if payload.UserAgent.Platform != nil {
+						afterPlatform = payload.UserAgent.Platform.String()
+					}
+					if payload.UserAgent.Device != nil {
+						afterDevice = payload.UserAgent.GetDevice()
+					}
+					if payload.UserAgent.Manufacturer != nil {
+						afterManufacturer = payload.UserAgent.GetManufacturer()
+					}
+					if payload.UserAgent.OsVersion != nil {
+						afterOsVersion = payload.UserAgent.GetOsVersion()
+					}
+					// 检查清理的字段
+					if payload.UserAgent.OsBuildNumber == nil {
+						cleanedFields = append(cleanedFields, "OsBuildNumber")
+					}
+					if payload.UserAgent.DeviceBoard == nil {
+						cleanedFields = append(cleanedFields, "DeviceBoard")
+					}
+					if payload.UserAgent.DeviceModelType == nil {
+						cleanedFields = append(cleanedFields, "DeviceModelType")
+					}
+				}
+				if payload.WebInfo != nil {
+					afterWebInfo = true
+					if payload.WebInfo.WebSubPlatform != nil {
+						afterWebSubPlatform = payload.WebInfo.WebSubPlatform.String()
+					}
+				}
+
+				// 记录关键变化
+				changes := []string{}
+				if beforeMCC != afterMCC {
+					changes = append(changes, fmt.Sprintf("MCC: %s->%s", beforeMCC, afterMCC))
+				}
+				if beforeMNC != afterMNC {
+					changes = append(changes, fmt.Sprintf("MNC: %s->%s", beforeMNC, afterMNC))
+				}
+				if beforeCountry != afterCountry {
+					changes = append(changes, fmt.Sprintf("Country: %s->%s", beforeCountry, afterCountry))
+				}
+				if beforeLanguage != afterLanguage {
+					changes = append(changes, fmt.Sprintf("Language: %s->%s", beforeLanguage, afterLanguage))
+				}
+				if !beforeWebInfo && afterWebInfo {
+					changes = append(changes, "WebInfo: created")
+				}
+
+				cli.Log.Infof("[Fingerprint] After ApplyFingerprint: MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, Device=%s, Manufacturer=%s, OS=%s",
+					afterMCC, afterMNC, afterCountry, afterLanguage, afterPlatform, afterDevice, afterManufacturer, afterOsVersion)
+				if afterWebInfo {
+					cli.Log.Infof("[Fingerprint] WebInfo: WebSubPlatform=%s", afterWebSubPlatform)
+				}
+				if len(cleanedFields) > 0 {
+					cli.Log.Debugf("[Fingerprint] Cleaned mobile fields: %v", cleanedFields)
+				}
+				if len(changes) > 0 {
+					cli.Log.Infof("[Fingerprint] Applied changes: %v", changes)
+				}
+
+				// 验证关键字段
+				validationIssues := []string{}
+				if payload.UserAgent != nil {
+					if payload.UserAgent.Mcc == nil || payload.UserAgent.Mnc == nil {
+						validationIssues = append(validationIssues, "MCC/MNC missing")
+					}
+					if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
+						validationIssues = append(validationIssues, "LocaleCountry missing")
+					}
+					if payload.UserAgent.LocaleLanguageIso6391 == nil {
+						validationIssues = append(validationIssues, "LocaleLanguage missing")
+					}
+					if payload.UserAgent.Platform == nil {
+						validationIssues = append(validationIssues, "Platform missing")
+					}
+					if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
+						if payload.UserAgent.OsBuildNumber != nil {
+							validationIssues = append(validationIssues, "WEB platform has OsBuildNumber (should be nil)")
+						}
+						if payload.UserAgent.DeviceBoard != nil {
+							validationIssues = append(validationIssues, "WEB platform has DeviceBoard (should be nil)")
+						}
+						if payload.UserAgent.DeviceModelType != nil {
+							validationIssues = append(validationIssues, "WEB platform has DeviceModelType (should be nil)")
+						}
+						if payload.UserAgent.GetDevice() != "Desktop" {
+							validationIssues = append(validationIssues, fmt.Sprintf("WEB platform Device=%s (should be Desktop)", payload.UserAgent.GetDevice()))
+						}
+					}
+				}
+				if payload.WebInfo == nil {
+					validationIssues = append(validationIssues, "WebInfo missing")
+				} else if payload.WebInfo.WebSubPlatform == nil {
+					validationIssues = append(validationIssues, "WebInfo.WebSubPlatform missing")
+				}
+
+				if len(validationIssues) > 0 {
+					cli.Log.Warnf("[Fingerprint] Validation issues found: %v", validationIssues)
+				} else {
+					cli.Log.Debugf("[Fingerprint] Validation passed: all required fields are set correctly")
+				}
+			}
+		}
+
+		// 记录最终 Payload 状态（包括 sanitizeClientPayload 的修改）
+		// 这是发送给服务器的最终 Payload，用于验证流程完整性
+		if cli.Log != nil && payload != nil && payload.UserAgent != nil {
+			finalMCC := ""
+			finalMNC := ""
+			finalCountry := ""
+			finalLanguage := ""
+			finalPlatform := ""
+			finalDevice := ""
+			finalWebInfo := false
+
+			if payload.UserAgent.Mcc != nil {
+				finalMCC = payload.UserAgent.GetMcc()
+			}
+			if payload.UserAgent.Mnc != nil {
+				finalMNC = payload.UserAgent.GetMnc()
+			}
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+				finalCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+			}
+			if payload.UserAgent.LocaleLanguageIso6391 != nil {
+				finalLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
+			}
+			if payload.UserAgent.Platform != nil {
+				finalPlatform = payload.UserAgent.Platform.String()
+			}
+			if payload.UserAgent.Device != nil {
+				finalDevice = payload.UserAgent.GetDevice()
+			}
+			if payload.WebInfo != nil {
+				finalWebInfo = true
+			}
+
+			cli.Log.Infof("[Fingerprint] Final Payload (ready to send): MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, Device=%s, WebInfo=%v",
+				finalMCC, finalMNC, finalCountry, finalLanguage, finalPlatform, finalDevice, finalWebInfo)
 		}
 
 		return payload
@@ -577,7 +852,15 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 func (cli *Client) SetCarrierInfo(mcc, mnc, operatorName string) {
 	cli.carrierInfoLock.Lock()
 	defer cli.carrierInfoLock.Unlock()
-	
+
+	// 检查是否有变更
+	hasChange := false
+	if cli.carrierInfo == nil {
+		hasChange = (mcc != "" && mnc != "")
+	} else {
+		hasChange = (cli.carrierInfo.MCC != mcc || cli.carrierInfo.MNC != mnc)
+	}
+
 	if mcc != "" && mnc != "" {
 		cli.carrierInfo = &CarrierInfo{
 			MCC:          mcc,
@@ -586,6 +869,9 @@ func (cli *Client) SetCarrierInfo(mcc, mnc, operatorName string) {
 		}
 		if cli.Log != nil {
 			cli.Log.Infof("[Fingerprint] Set carrier info from proxy IP: MCC=%s, MNC=%s, Operator=%s", mcc, mnc, operatorName)
+			if hasChange && cli.socket != nil {
+				cli.Log.Warnf("[Fingerprint] Carrier info changed while connected (MCC=%s, MNC=%s). Consider reconnecting to apply new MCC/MNC", mcc, mnc)
+			}
 		}
 	} else {
 		cli.carrierInfo = nil
@@ -1031,7 +1317,7 @@ func (cli *Client) Logout(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("error sending logout request: %w", err)
 	}
-	
+
 	// 清除内存中的临时指纹
 	cli.pendingFingerprintLock.Lock()
 	hadPending := cli.pendingFingerprint != nil
@@ -1043,7 +1329,7 @@ func (cli *Client) Logout(ctx context.Context) error {
 	}
 	// 注意：不清理 carrierInfo，因为它是外部传入的，可能需要在下次连接时继续使用
 	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "", "")
-	
+
 	// 删除实际 JID 的指纹（但保留电话号码 JID 的临时指纹，供下次配对使用）
 	if container, ok := cli.Store.Container.(*sqlstore.Container); ok {
 		if cli.Log != nil {
@@ -1056,7 +1342,7 @@ func (cli *Client) Logout(ctx context.Context) error {
 			cli.Log.Infof("[Fingerprint] Successfully deleted fingerprint for %s", ownID.User)
 		}
 	}
-	
+
 	cli.Disconnect()
 	err = cli.Store.Delete(ctx)
 	if err != nil {

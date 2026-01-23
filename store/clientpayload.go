@@ -322,11 +322,64 @@ func sanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 		}
 
 		// 最终安全网：确保必填字段不为 nil
+		// 注意：优先使用已设置的值，避免覆盖指纹模块的设置
+		// 优先级：MCC -> LocaleCountry（如果 MCC 已设置，根据 MCC 推断 LocaleCountry）
 		if payload.UserAgent.Mcc == nil {
-			payload.UserAgent.Mcc = proto.String("404") // 降级到印度默认
+			// 如果 MCC 为空，根据 LocaleCountry 推断 MCC
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
+				country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
+				switch country {
+				case "BR":
+					payload.UserAgent.Mcc = proto.String("724")
+					if payload.UserAgent.Mnc == nil {
+						payload.UserAgent.Mnc = proto.String("02")
+					}
+				case "IN":
+					payload.UserAgent.Mcc = proto.String("404")
+					if payload.UserAgent.Mnc == nil {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
+				default:
+					// 未知国家，使用印度默认（向后兼容）
+					payload.UserAgent.Mcc = proto.String("404")
+					if payload.UserAgent.Mnc == nil {
+						payload.UserAgent.Mnc = proto.String("01")
+					}
+				}
+			} else {
+				// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
+				payload.UserAgent.Mcc = proto.String("404")
+				if payload.UserAgent.Mnc == nil {
+					payload.UserAgent.Mnc = proto.String("01")
+				}
+			}
+		} else {
+			// 如果 MCC 已设置，确保 LocaleCountry 与 MCC 一致
+			if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
+				mcc := payload.UserAgent.GetMcc()
+				switch mcc {
+				case "404", "405":
+					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
+				case "724":
+					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("BR")
+				}
+			}
 		}
 		if payload.UserAgent.Mnc == nil {
-			payload.UserAgent.Mnc = proto.String("01")
+			// 如果 MCC 已设置但 MNC 为空，设置默认 MNC
+			if payload.UserAgent.Mcc != nil {
+				mcc := payload.UserAgent.GetMcc()
+				switch mcc {
+				case "724":
+					payload.UserAgent.Mnc = proto.String("02")
+				case "404", "405":
+					payload.UserAgent.Mnc = proto.String("01")
+				default:
+					payload.UserAgent.Mnc = proto.String("01")
+				}
+			} else {
+				payload.UserAgent.Mnc = proto.String("01")
+			}
 		}
 		if payload.UserAgent.OsVersion == nil {
 			payload.UserAgent.OsVersion = proto.String("10.0.0")
@@ -335,7 +388,22 @@ func sanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 			payload.UserAgent.LocaleLanguageIso6391 = proto.String("en")
 		}
 		if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
-			payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
+			// 根据 MCC 推断 LocaleCountry，而不是硬编码为 IN
+			if payload.UserAgent.Mcc != nil {
+				mcc := payload.UserAgent.GetMcc()
+				switch mcc {
+				case "724":
+					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("BR")
+				case "404", "405":
+					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
+				default:
+					// 未知 MCC，使用印度默认（向后兼容）
+					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
+				}
+			} else {
+				// 如果连 MCC 都没有，使用印度默认（向后兼容）
+				payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
+			}
 		}
 	}
 	return payload
