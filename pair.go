@@ -244,33 +244,67 @@ func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, r
 				cli.Log.Infof("[Fingerprint] Migrating fingerprint to JID %s (fingerprint: %s %s, MCC: %s, MNC: %s)",
 					jid.User, pendingFP.Manufacturer, pendingFP.Device, pendingFP.Mcc, pendingFP.Mnc)
 			}
-			// 配对成功后设置会话地理信息缓存（如果指纹中有地理信息）
-			// 注意：业务层应该已经通过 SetUserLoginGeoInfo 设置了地理信息，这里作为兜底
-			if pendingFP.LocaleCountry != "" && pendingFP.LocaleLanguage != "" {
-				// 从国家代码推断时区（兜底逻辑）
-				timezone := getTimezoneByCountry(pendingFP.LocaleCountry)
-				cli.SetUserLoginGeoInfo(pendingFP.LocaleCountry, timezone, pendingFP.LocaleLanguage)
+			// 配对成功后处理会话地理信息缓存
+			// 优先使用业务层已设置的地理信息，确保配对和连接成功的指纹一致
+			sessionGeo := cli.getSessionGeoCache()
+			// 先复制指纹结构体，避免并发修改
+			fpCopy := *pendingFP
+			if sessionGeo != nil && sessionGeo.Locked {
+				// 业务层已设置，确保指纹中的地理信息与业务层一致
+				if fpCopy.LocaleCountry != sessionGeo.Country || fpCopy.LocaleLanguage != sessionGeo.Language {
+					if cli.Log != nil {
+						cli.Log.Infof("[Fingerprint] Updating fingerprint geo info to match session cache: Country=%s->%s, Language=%s->%s",
+							fpCopy.LocaleCountry, sessionGeo.Country, fpCopy.LocaleLanguage, sessionGeo.Language)
+					}
+					fpCopy.LocaleCountry = sessionGeo.Country
+					fpCopy.LocaleLanguage = sessionGeo.Language
+				}
+			} else if fpCopy.LocaleCountry != "" && fpCopy.LocaleLanguage != "" {
+				// 业务层未设置，从指纹读取作为兜底
+				timezone := getTimezoneByCountry(fpCopy.LocaleCountry)
+				cli.SetUserLoginGeoInfo(fpCopy.LocaleCountry, timezone, fpCopy.LocaleLanguage)
 				if cli.Log != nil {
 					cli.Log.Infof("[Fingerprint] Set session geo cache from fingerprint: Country=%s, Timezone=%s, Language=%s",
-						pendingFP.LocaleCountry, timezone, pendingFP.LocaleLanguage)
+						fpCopy.LocaleCountry, timezone, fpCopy.LocaleLanguage)
 				}
 			}
-			// 复制指纹结构体，避免并发修改
-			fpCopy := *pendingFP
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+			// 捕获 tempJID 到 goroutine 中，避免闭包问题
+			tempJIDForDelete := tempJID
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+				if cli.Log != nil {
 					cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint after pairing for %s: %v", jid.User, saveErr)
-				} else {
-					cli.Log.Infof("[Fingerprint] Successfully migrated temporary fingerprint to JID %s after pairing", jid.User)
-					// 清除内存中的临时指纹
-					cli.pendingFingerprintLock.Lock()
-					cli.pendingFingerprint = nil
-					cli.pendingFingerprintSaved.Store(false)
-					cli.pendingFingerprintLock.Unlock()
 				}
-			}()
+				// 保存失败时不删除临时指纹，保留供重试使用
+			} else {
+				if cli.Log != nil {
+					cli.Log.Infof("[Fingerprint] Successfully migrated temporary fingerprint to JID %s after pairing", jid.User)
+				}
+				// 清除内存中的临时指纹（配对成功后不再需要）
+				cli.pendingFingerprintLock.Lock()
+				cli.pendingFingerprint = nil
+				cli.pendingFingerprintSaved.Store(false)
+				cli.pendingFingerprintLock.Unlock()
+				// 删除 tempJID 的临时指纹（配对成功后不再需要，避免数据库残留）
+				// 注意：删除操作在保存成功后进行，确保主指纹已保存
+				if !tempJIDForDelete.IsEmpty() {
+					if delErr := container.DeleteFingerprint(ctx, tempJIDForDelete); delErr != nil {
+						if cli.Log != nil {
+							cli.Log.Warnf("[Fingerprint] Failed to delete temporary fingerprint for %s: %v (non-critical, may retry later)", tempJIDForDelete.User, delErr)
+						}
+						// 删除失败不影响配对流程，后续可以通过清理任务处理
+					} else {
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Successfully deleted temporary fingerprint for %s after pairing", tempJIDForDelete.User)
+						}
+					}
+				} else if cli.Log != nil {
+					cli.Log.Debugf("[Fingerprint] Skipping temporary fingerprint deletion: tempJID is empty")
+				}
+			}
+		}()
 		}
 	}
 	err = cli.Store.Identities.PutIdentity(ctx, mainDeviceLID.SignalAddress().String(), mainDeviceIdentity)

@@ -381,9 +381,11 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 
 			if !tempJID.IsEmpty() {
 				// 尝试从数据库读取之前保存的临时指纹
-				fp, err = container.GetFingerprint(ctx, tempJID)
-				if err != nil {
+			fp, err = container.GetFingerprint(ctx, tempJID)
+			if err != nil {
+				if cli.Log != nil {
 					cli.Log.Warnf("[Fingerprint] Failed to get temporary fingerprint for %s: %v", tempJID.User, err)
+				}
 				} else if fp != nil {
 					if cli.Log != nil {
 						cli.Log.Infof("[Fingerprint] Found temporary fingerprint in database for %s", tempJID.User)
@@ -440,10 +442,14 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 							defer cancel()
 							if saveErr := container.PutFingerprint(ctx, tempJID, &fpCopy); saveErr != nil {
-								cli.Log.Warnf("[Fingerprint] Failed to save temporary fingerprint for %s: %v", tempJID.User, saveErr)
+								if cli.Log != nil {
+									cli.Log.Warnf("[Fingerprint] Failed to save temporary fingerprint for %s: %v", tempJID.User, saveErr)
+								}
 								cli.pendingFingerprintSaved.Store(false) // 保存失败，重置标记
 							} else {
-								cli.Log.Infof("[Fingerprint] Successfully saved temporary fingerprint for %s (will be reused if pairing times out)", tempJID.User)
+								if cli.Log != nil {
+									cli.Log.Infof("[Fingerprint] Successfully saved temporary fingerprint for %s (will be reused if pairing times out)", tempJID.User)
+								}
 							}
 						}()
 					} else {
@@ -461,7 +467,8 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 				// 设置到内存中，供配对成功后使用
 				cli.pendingFingerprintLock.Lock()
 				cli.pendingFingerprint = fp
-				cli.pendingFingerprintSaved.Store(true) // 已从数据库读取，标记为已保存
+				// 注意：标记为未保存，因为后续可能会更新地理信息或运营商信息
+				cli.pendingFingerprintSaved.Store(false)
 				cli.pendingFingerprintLock.Unlock()
 			}
 		} else {
@@ -471,7 +478,9 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 			}
 			fp, err = container.GetFingerprint(ctx, jid)
 			if err != nil {
-				cli.Log.Warnf("[Fingerprint] Failed to get fingerprint for %s: %v", jid.User, err)
+				if cli.Log != nil {
+					cli.Log.Warnf("[Fingerprint] Failed to get fingerprint for %s: %v", jid.User, err)
+				}
 				// 尝试使用临时指纹
 				cli.pendingFingerprintLock.Lock()
 				if cli.pendingFingerprint != nil {
@@ -487,9 +496,13 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
 						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
-							cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
+							if cli.Log != nil {
+								cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
+							}
 						} else {
-							cli.Log.Infof("[Fingerprint] Saved pending fingerprint for %s (recovered from memory)", jid.User)
+							if cli.Log != nil {
+								cli.Log.Infof("[Fingerprint] Saved pending fingerprint for %s (recovered from memory)", jid.User)
+							}
 							// 清除临时指纹
 							cli.pendingFingerprintLock.Lock()
 							cli.pendingFingerprint = nil
@@ -522,9 +535,13 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 						defer cancel()
 						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
-							cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
+							if cli.Log != nil {
+								cli.Log.Warnf("[Fingerprint] Failed to save pending fingerprint for %s: %v", jid.User, saveErr)
+							}
 						} else {
-							cli.Log.Infof("[Fingerprint] Successfully migrated pending fingerprint for %s to database", jid.User)
+							if cli.Log != nil {
+								cli.Log.Infof("[Fingerprint] Successfully migrated pending fingerprint for %s to database", jid.User)
+							}
 							// 清除临时指纹
 							cli.pendingFingerprintLock.Lock()
 							cli.pendingFingerprint = nil
@@ -563,9 +580,13 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 							defer cancel()
 							if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
-								cli.Log.Warnf("[Fingerprint] Failed to update fingerprint for %s: %v", jid.User, saveErr)
+								if cli.Log != nil {
+									cli.Log.Warnf("[Fingerprint] Failed to update fingerprint for %s: %v", jid.User, saveErr)
+								}
 							} else {
-								cli.Log.Infof("[Fingerprint] Successfully updated fingerprint for %s (geo/carrier only)", jid.User)
+								if cli.Log != nil {
+									cli.Log.Infof("[Fingerprint] Successfully updated fingerprint for %s (geo/carrier only)", jid.User)
+								}
 							}
 						}()
 					} else {
@@ -592,15 +613,19 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 						}
 						// 复制指纹结构体，避免并发修改
 						fpCopy := *fp
-						go func() {
-							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-							defer cancel()
-							if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+							if cli.Log != nil {
 								cli.Log.Warnf("[Fingerprint] Failed to save new fingerprint for %s: %v", jid.User, saveErr)
-							} else {
+							}
+						} else {
+							if cli.Log != nil {
 								cli.Log.Infof("[Fingerprint] Successfully saved new fingerprint for %s", jid.User)
 							}
-						}()
+						}
+					}()
 					}
 				}
 			} else {
@@ -621,6 +646,14 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		}
 
 		if fp != nil {
+			// 记录是否修改了临时指纹（用于判断是否需要保存回数据库）
+			fpModified := false
+			// 记录修改前的值，用于日志
+			oldMCC := fp.Mcc
+			oldMNC := fp.Mnc
+			oldCountry := fp.LocaleCountry
+			oldLanguage := fp.LocaleLanguage
+			
 			// 1. 应用业务层传入的 MCC/MNC（如果已设置，允许只设置其中一个）
 			if carrierInfo != nil {
 				if carrierInfo.MCC != "" {
@@ -629,6 +662,7 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							cli.Log.Debugf("[Fingerprint] Applying carrier MCC: %s -> %s", fp.Mcc, carrierInfo.MCC)
 						}
 						fp.Mcc = carrierInfo.MCC
+						fpModified = true
 					}
 				}
 				if carrierInfo.MNC != "" {
@@ -637,6 +671,7 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 							cli.Log.Debugf("[Fingerprint] Applying carrier MNC: %s -> %s", fp.Mnc, carrierInfo.MNC)
 						}
 						fp.Mnc = carrierInfo.MNC
+						fpModified = true
 					}
 				}
 			}
@@ -650,6 +685,51 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 					}
 					fp.LocaleCountry = sessionGeo.Country
 					fp.LocaleLanguage = sessionGeo.Language
+					fpModified = true
+				}
+			}
+			
+			// 3. 如果修改了临时指纹（配对阶段），保存回数据库（多次匹配时更新）
+			if fpModified && jid == types.EmptyJID {
+				// 获取 tempJID（配对阶段的电话号码 JID）
+				var tempJIDForSave types.JID
+				if cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
+					tempJIDForSave = cli.phoneLinkingCache.jid
+				}
+				if !tempJIDForSave.IsEmpty() {
+					// 使用原子操作避免并发重复保存
+					// 注意：即使保存失败重置标记，由于 GetClientPayload 每次都会重新读取/生成 fp，
+					// 下次调用时会重新检测到修改并再次尝试保存，确保最终一致性
+					if cli.pendingFingerprintSaved.CompareAndSwap(false, true) {
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Updating temporary fingerprint for %s (MCC: %s->%s, MNC: %s->%s, Country: %s->%s, Language: %s->%s)",
+								tempJIDForSave.User, oldMCC, fp.Mcc, oldMNC, fp.Mnc, oldCountry, fp.LocaleCountry, oldLanguage, fp.LocaleLanguage)
+						}
+						// 复制指纹结构体，避免并发修改
+						fpCopy := *fp
+						// 捕获 tempJIDForSave 到 goroutine 中，避免闭包问题
+						tempJIDCaptured := tempJIDForSave
+					go func() {
+						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if saveErr := container.PutFingerprint(ctx, tempJIDCaptured, &fpCopy); saveErr != nil {
+							if cli.Log != nil {
+								cli.Log.Warnf("[Fingerprint] Failed to update temporary fingerprint for %s: %v", tempJIDCaptured.User, saveErr)
+							}
+							cli.pendingFingerprintSaved.Store(false) // 保存失败，重置标记，允许下次重试
+						} else {
+							if cli.Log != nil {
+								cli.Log.Infof("[Fingerprint] Successfully updated temporary fingerprint for %s", tempJIDCaptured.User)
+							}
+						}
+					}()
+					} else {
+						if cli.Log != nil {
+							cli.Log.Debugf("[Fingerprint] Skipping duplicate update for %s (already updating by another goroutine)", tempJIDForSave.User)
+						}
+					}
+				} else if cli.Log != nil {
+					cli.Log.Debugf("[Fingerprint] Cannot update temporary fingerprint: tempJID is empty")
 				}
 			}
 
@@ -765,7 +845,10 @@ func getTimezoneByCountry(country string) string {
 //   - timezone: 时区，如 "Asia/Kolkata"（仅用于会话锁定，不写入Payload）
 //   - language: 语言代码，如 "hi", "pt", "en"
 //
-// 首次设置后会话内锁定，禁止修改；断开连接时清除锁定；重登时允许重新设置
+// 说明：
+//   - 业务层可以多次调用此方法，每次调用都会更新（覆盖之前的值）
+//   - 设置后会话内锁定，防止指纹信息覆盖业务层设置
+//   - 断开连接时清除锁定；重登时允许重新设置
 func (cli *Client) SetUserLoginGeoInfo(country, timezone, language string) {
 	if country == "" {
 		if cli.Log != nil {
@@ -777,6 +860,7 @@ func (cli *Client) SetUserLoginGeoInfo(country, timezone, language string) {
 	cli.sessionGeoLock.Lock()
 	defer cli.sessionGeoLock.Unlock()
 
+	// 业务层可以多次调用并覆盖，每次调用都更新并锁定
 	cli.sessionGeoCache = &SessionGeoCache{
 		Country:  country,
 		Timezone: timezone,
@@ -1453,16 +1537,41 @@ func (cli *Client) Logout(ctx context.Context) error {
 	// 注意：不清理 carrierInfo，因为它是外部传入的，可能需要在下次连接时继续使用
 	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "", "")
 
-	// 删除实际 JID 的指纹（但保留电话号码 JID 的临时指纹，供下次配对使用）
+	// 删除所有指纹（主指纹 + 临时指纹，彻底清理）
 	if container, ok := cli.Store.Container.(*sqlstore.Container); ok {
+		// 删除实际 JID 的主指纹
 		if cli.Log != nil {
-			cli.Log.Infof("[Fingerprint] Logout: deleting fingerprint for JID %s (temporary phone fingerprint preserved)", ownID.User)
+			cli.Log.Infof("[Fingerprint] Logout: deleting fingerprint for JID %s", ownID.User)
 		}
 		if err := container.DeleteFingerprint(ctx, ownID); err != nil {
-			cli.Log.Warnf("[Fingerprint] Failed to delete fingerprint for %s: %v", ownID.User, err)
+			if cli.Log != nil {
+				cli.Log.Warnf("[Fingerprint] Failed to delete fingerprint for %s: %v", ownID.User, err)
+			}
 			// 不阻止 logout 流程
 		} else {
-			cli.Log.Infof("[Fingerprint] Successfully deleted fingerprint for %s", ownID.User)
+			if cli.Log != nil {
+				cli.Log.Infof("[Fingerprint] Successfully deleted fingerprint for %s", ownID.User)
+			}
+		}
+		// 删除临时指纹（如果存在）
+		var tempJID types.JID
+		if cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
+			tempJID = cli.phoneLinkingCache.jid
+		}
+		if !tempJID.IsEmpty() {
+			if cli.Log != nil {
+				cli.Log.Infof("[Fingerprint] Logout: deleting temporary fingerprint for %s", tempJID.User)
+			}
+			if err := container.DeleteFingerprint(ctx, tempJID); err != nil {
+				if cli.Log != nil {
+					cli.Log.Warnf("[Fingerprint] Failed to delete temporary fingerprint for %s: %v", tempJID.User, err)
+				}
+				// 不阻止 logout 流程
+			} else {
+				if cli.Log != nil {
+					cli.Log.Infof("[Fingerprint] Successfully deleted temporary fingerprint for %s", tempJID.User)
+				}
+			}
 		}
 	}
 
