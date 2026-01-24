@@ -12,6 +12,7 @@ import (
 
 	waBinary "go.mau.fi/whatsmeow/binary"
 	"go.mau.fi/whatsmeow/store"
+	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 )
@@ -206,7 +207,36 @@ func (cli *Client) handleConnectSuccess(ctx context.Context, node *waBinary.Node
 	// Some users are missing their own LID-PN mapping even though it's already in the device table,
 	// so do this unconditionally for a few months to ensure everyone gets the row.
 	cli.StoreLIDPNMapping(ctx, cli.Store.GetLID(), cli.Store.GetJID())
+	
+	// 连接成功后设置会话地理信息缓存（如果尚未设置）
+	// 从数据库读取指纹并设置会话缓存（作为兜底，业务层应该已经通过 SetUserLoginGeoInfo 设置）
+	if container, ok := cli.Store.Container.(*sqlstore.Container); ok {
+		jid := cli.Store.GetJID()
+		if !jid.IsEmpty() {
+			// 检查会话缓存是否已设置
+			sessionGeo := cli.getSessionGeoCache()
+			if sessionGeo == nil || !sessionGeo.Locked {
+				// 从数据库读取指纹
+				if fp, err := container.GetFingerprint(ctx, jid); err == nil && fp != nil {
+					if fp.LocaleCountry != "" && fp.LocaleLanguage != "" {
+						// 从国家代码推断时区（兜底逻辑）
+						timezone := getTimezoneByCountry(fp.LocaleCountry)
+						cli.SetUserLoginGeoInfo(fp.LocaleCountry, timezone, fp.LocaleLanguage)
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Set session geo cache from database fingerprint: Country=%s, Timezone=%s, Language=%s",
+								fp.LocaleCountry, timezone, fp.LocaleLanguage)
+						}
+					}
+				}
+			}
+		}
+	}
+	
 	go func() {
+		// 添加超时控制，避免阻塞过久
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		
 		if dbCount, err := cli.Store.PreKeys.UploadedPreKeyCount(ctx); err != nil {
 			cli.Log.Errorf("Failed to get number of prekeys in database: %v", err)
 		} else if serverCount, err := cli.getServerPreKeyCount(ctx); err != nil {

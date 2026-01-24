@@ -15,6 +15,7 @@ import (
 	"go.mau.fi/libsignal/ecc"
 	"google.golang.org/protobuf/proto"
 
+	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waCert"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/socket"
@@ -99,11 +100,39 @@ func (cli *Client) doHandshake(ctx context.Context, fs *socket.FrameSocket, ephe
 		clientPayload = cli.Store.GetClientPayload()
 	}
 
+	// 发送前一致性校验（确保符合方案要求）
+	if err := cli.validateClientPayload(clientPayload); err != nil {
+		if cli.Log != nil {
+			cli.Log.Errorf("[Fingerprint] Payload validation failed: %v", err)
+		}
+		// 校验失败时强制修正（使用兜底值）
+		clientPayload = cli.fixClientPayload(clientPayload)
+		if err := cli.validateClientPayload(clientPayload); err != nil {
+			// 如果修正后仍然失败，禁止发送
+			return fmt.Errorf("payload validation failed even after fix: %w", err)
+		}
+		if cli.Log != nil {
+			cli.Log.Warnf("[Fingerprint] Payload fixed and re-validated successfully")
+		}
+	}
+
 	if cli.Log != nil && clientPayload != nil {
 		ua := clientPayload.GetUserAgent()
-		cli.Log.Infof("发送握手 Payload - 平台: %s, 浏览器: %v, OS: %s, OS版本: %s, 语言: %s, MCC: %s, MNC: %s, Country: %s",
-			ua.GetPlatform(), clientPayload.GetWebInfo().GetWebSubPlatform(), ua.GetDevice(), ua.GetOsVersion(), 
-			ua.GetLocaleLanguageIso6391(), ua.GetMcc(), ua.GetMnc(), ua.GetLocaleCountryIso31661Alpha2())
+		// 发送前完整日志（用于封控率分析和问题追踪）
+		cli.Log.Infof("[Fingerprint] 发送握手 Payload - 平台: %s, 浏览器: %v, 设备: %s, 制造商: %s, OS版本: %s, 语言: %s, 国家: %s, MCC: %s, MNC: %s",
+			ua.GetPlatform(), clientPayload.GetWebInfo().GetWebSubPlatform(), 
+			ua.GetDevice(), ua.GetManufacturer(), ua.GetOsVersion(),
+			ua.GetLocaleLanguageIso6391(), ua.GetLocaleCountryIso31661Alpha2(),
+			ua.GetMcc(), ua.GetMnc())
+		
+		// DeviceProps 关键信息（用于验证 PlatformType 映射）
+		if clientPayload.DevicePairingData != nil && len(clientPayload.DevicePairingData.DeviceProps) > 0 {
+			var deviceProps waCompanionReg.DeviceProps
+			if err := proto.Unmarshal(clientPayload.DevicePairingData.DeviceProps, &deviceProps); err == nil {
+				cli.Log.Debugf("[Fingerprint] DeviceProps - Os: %s, PlatformType: %v", 
+					deviceProps.GetOs(), deviceProps.GetPlatformType())
+			}
+		}
 	}
 
 	clientFinishPayloadBytes, err := proto.Marshal(clientPayload)
@@ -131,6 +160,11 @@ func (cli *Client) doHandshake(ctx context.Context, fs *socket.FrameSocket, ephe
 	}
 
 	cli.socket = ns
+	
+	// 握手成功日志（用于验证流程闭环）
+	if cli.Log != nil {
+		cli.Log.Infof("[Fingerprint] 握手成功完成 - JID: %s, 设备指纹已应用", cli.Store.ID)
+	}
 
 	return nil
 }

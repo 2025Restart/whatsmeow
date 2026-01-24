@@ -26,6 +26,7 @@ import (
 	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 	"golang.org/x/net/proxy"
+	"google.golang.org/protobuf/proto"
 
 	"go.mau.fi/whatsmeow/appstate"
 	waBinary "go.mau.fi/whatsmeow/binary"
@@ -203,9 +204,13 @@ type Client struct {
 
 	// CarrierInfo 外部传入的运营商信息（优先级最高）
 	// 如果业务层通过前置探测获取到代理 IP 的运营商信息，应调用 SetCarrierInfo 设置
-	// 优先级：外部传入 > 手机号匹配 > 默认值
 	carrierInfo     *CarrierInfo
 	carrierInfoLock sync.RWMutex
+
+	// sessionGeoCache 会话地理信息缓存（用于会话内锁定）
+	// 首次设置后锁定，会话内禁止修改，断开连接时清除
+	sessionGeoCache *SessionGeoCache
+	sessionGeoLock  sync.RWMutex
 }
 
 type groupMetaCache struct {
@@ -222,9 +227,17 @@ type MessengerConfig struct {
 
 // CarrierInfo 运营商信息（从代理 IP 探测获取）
 type CarrierInfo struct {
-	MCC          string // 移动国家代码 (如 "404", "405", "724")
-	MNC          string // 移动网络代码 (如 "10", "20", "874")
-	OperatorName string // 运营商名称 (如 "Airtel", "Jio", "Vivo")
+	MCC string // 移动国家代码 (如 "404", "405", "724")
+	MNC string // 移动网络代码（如 "000" 表示固定宽带，或其他值表示移动网络）
+}
+
+// SessionGeoCache 会话地理信息缓存
+// 用于会话内锁定 Country/Timezone/Language，保证最小封控率
+type SessionGeoCache struct {
+	Country  string // 国家代码，如 "IN", "BR"
+	Timezone string // 时区，如 "Asia/Kolkata"（仅用于锁定，不写入Payload）
+	Language string // 语言代码，如 "hi", "pt", "en"
+	Locked   bool   // 是否已锁定
 }
 
 // Size of buffer for the channel that all incoming XML nodes go through.
@@ -336,30 +349,18 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		payload := deviceStore.GetClientPayload()
 		jid := deviceStore.GetJID()
 
-		// 1. 动态地区匹配：优先根据手机号识别地区 (91->IN, 55->BR)
-		dynamicRegion := regionCode
-		phone := ""
-		if !jid.IsEmpty() {
-			phone = jid.User
-		} else if cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
-			phone = cli.phoneLinkingCache.jid.User
-		}
+		// 1. 获取会话锁定的地理信息（如果已锁定）
+		sessionGeo := cli.getSessionGeoCache()
 
-		if phone != "" {
-			if matchedRegion := fingerprint.GetRegionByPhone(phone); matchedRegion != "" {
-				dynamicRegion = matchedRegion
-				if cli.Log != nil {
-					cli.Log.Debugf("[Fingerprint] Phone %s matched dynamic region: %s (original config: %s)", phone, matchedRegion, regionCode)
-				}
-			}
-		}
+		// 2. 获取业务层传入的 MCC/MNC（如果已设置）
+		carrierInfo := cli.GetCarrierInfo()
 
 		ctx := context.Background()
 		var fp *store.DeviceFingerprint
 		var err error
 
-		// 提前获取 carrierInfo，用于在生成指纹时使用
-		carrierInfo := cli.GetCarrierInfo()
+		// regionCode 仅用于设备指纹生成（设备型号、语言分布等），不再用于地理信息
+		regionCodeForDevice := regionCode
 
 		if jid == types.EmptyJID {
 			// 配对阶段：尝试从数据库读取临时指纹（使用电话号码 JID）
@@ -396,29 +397,29 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 			if fp == nil {
 				cli.pendingFingerprintLock.Lock()
 				if cli.pendingFingerprint == nil {
-					// 生成临时指纹
-					cli.pendingFingerprint = fingerprint.GenerateFingerprint(dynamicRegion)
-					// 如果已有 carrierInfo，立即使用它覆盖 MCC/MNC（在保存前）
-					if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
-						cli.pendingFingerprint.Mcc = carrierInfo.MCC
-						cli.pendingFingerprint.Mnc = carrierInfo.MNC
-						// 根据 MCC 同步 LocaleCountry
-						if countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC); countryFromMCC != "" {
-							cli.pendingFingerprint.LocaleCountry = countryFromMCC
-						} else if dynamicRegion != "" {
-							cli.pendingFingerprint.LocaleCountry = dynamicRegion
+					// 生成临时指纹（仅用于设备特征，地理信息由业务层传入）
+					cli.pendingFingerprint = fingerprint.GenerateFingerprint(regionCodeForDevice)
+					// 应用业务层传入的 MCC/MNC（如果已设置，允许只设置其中一个）
+					if carrierInfo != nil {
+						if carrierInfo.MCC != "" {
+							cli.pendingFingerprint.Mcc = carrierInfo.MCC
 						}
-						if cli.Log != nil {
-							cli.Log.Infof("[Fingerprint] Applied carrier info to new fingerprint: MCC=%s, MNC=%s, Country=%s",
-								carrierInfo.MCC, carrierInfo.MNC, cli.pendingFingerprint.LocaleCountry)
+						if carrierInfo.MNC != "" {
+							cli.pendingFingerprint.Mnc = carrierInfo.MNC
 						}
+					}
+					// 应用会话锁定的地理信息（如果已锁定）
+					if sessionGeo != nil && sessionGeo.Locked {
+						cli.pendingFingerprint.LocaleCountry = sessionGeo.Country
+						cli.pendingFingerprint.LocaleLanguage = sessionGeo.Language
 					}
 					cli.pendingFingerprintSaved.Store(false) // 重置保存标记
 					if cli.Log != nil {
-						cli.Log.Infof("Generated temporary fingerprint for pairing (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
-							dynamicRegion, cli.pendingFingerprint.Manufacturer, cli.pendingFingerprint.Device,
+						cli.Log.Infof("Generated temporary fingerprint for pairing: %s %s (%s %s), MCC: %s, MNC: %s, Country: %s, Language: %s",
+							cli.pendingFingerprint.Manufacturer, cli.pendingFingerprint.Device,
 							cli.pendingFingerprint.DevicePropsOs, cli.pendingFingerprint.OsVersion,
-							cli.pendingFingerprint.Mcc, cli.pendingFingerprint.Mnc, cli.pendingFingerprint.LocaleLanguage)
+							cli.pendingFingerprint.Mcc, cli.pendingFingerprint.Mnc,
+							cli.pendingFingerprint.LocaleCountry, cli.pendingFingerprint.LocaleLanguage)
 					}
 				}
 				fp = cli.pendingFingerprint
@@ -531,39 +532,74 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 					}()
 				} else {
 					cli.pendingFingerprintLock.Unlock()
-					// 生成新指纹
-					fp = fingerprint.GenerateFingerprint(dynamicRegion)
-					// 如果已有 carrierInfo，立即使用它覆盖 MCC/MNC（在保存前）
-					if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
-						fp.Mcc = carrierInfo.MCC
-						fp.Mnc = carrierInfo.MNC
-						// 根据 MCC 同步 LocaleCountry
-						if countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC); countryFromMCC != "" {
-							fp.LocaleCountry = countryFromMCC
-						} else if dynamicRegion != "" {
-							fp.LocaleCountry = dynamicRegion
+					// 多次匹配（再次配对）：尝试复用数据库中的主指纹（如果存在）
+					// 按照方案要求，同一账号的设备特征永远相同
+					existingFp, getErr := container.GetFingerprint(ctx, jid)
+					if getErr == nil && existingFp != nil {
+						// 复用主指纹（设备特征完全不变）
+						fp = existingFp
+						if cli.Log != nil {
+							cli.Log.Infof("[Fingerprint] Reusing main fingerprint for re-pairing %s: %s %s (%s %s), MCC: %s, MNC: %s (device features unchanged)",
+								jid.User, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion, fp.Mcc, fp.Mnc)
+						}
+						// 仅更新地理信息和运营商信息（允许变更字段）
+						if carrierInfo != nil {
+							if carrierInfo.MCC != "" {
+								fp.Mcc = carrierInfo.MCC
+							}
+							if carrierInfo.MNC != "" {
+								fp.Mnc = carrierInfo.MNC
+							}
+						}
+						if sessionGeo != nil && sessionGeo.Locked {
+							fp.LocaleCountry = sessionGeo.Country
+							fp.LocaleLanguage = sessionGeo.Language
+						}
+						// 更新数据库中的指纹（仅更新地理信息和运营商信息）
+						fpCopy := *fp
+						go func() {
+							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer cancel()
+							if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+								cli.Log.Warnf("[Fingerprint] Failed to update fingerprint for %s: %v", jid.User, saveErr)
+							} else {
+								cli.Log.Infof("[Fingerprint] Successfully updated fingerprint for %s (geo/carrier only)", jid.User)
+							}
+						}()
+					} else {
+						// 数据库中没有主指纹，生成新指纹（首次匹配）
+						fp = fingerprint.GenerateFingerprint(regionCodeForDevice)
+						// 应用业务层传入的 MCC/MNC（如果已设置，允许只设置其中一个）
+						if carrierInfo != nil {
+							if carrierInfo.MCC != "" {
+								fp.Mcc = carrierInfo.MCC
+							}
+							if carrierInfo.MNC != "" {
+								fp.Mnc = carrierInfo.MNC
+							}
+						}
+						// 应用会话锁定的地理信息（如果已锁定）
+						if sessionGeo != nil && sessionGeo.Locked {
+							fp.LocaleCountry = sessionGeo.Country
+							fp.LocaleLanguage = sessionGeo.Language
 						}
 						if cli.Log != nil {
-							cli.Log.Infof("[Fingerprint] Applied carrier info to new fingerprint: MCC=%s, MNC=%s, Country=%s",
-								carrierInfo.MCC, carrierInfo.MNC, fp.LocaleCountry)
+							cli.Log.Infof("[Fingerprint] Generated new fingerprint for %s: %s %s (%s %s), MCC: %s, MNC: %s, Country: %s, Language: %s",
+								jid.User, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
+								fp.Mcc, fp.Mnc, fp.LocaleCountry, fp.LocaleLanguage)
 						}
+						// 复制指纹结构体，避免并发修改
+						fpCopy := *fp
+						go func() {
+							ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer cancel()
+							if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
+								cli.Log.Warnf("[Fingerprint] Failed to save new fingerprint for %s: %v", jid.User, saveErr)
+							} else {
+								cli.Log.Infof("[Fingerprint] Successfully saved new fingerprint for %s", jid.User)
+							}
+						}()
 					}
-					if cli.Log != nil {
-						cli.Log.Infof("[Fingerprint] Generated new fingerprint for %s (region: %s): %s %s (%s %s), MCC: %s, MNC: %s, Language: %s",
-							jid.User, dynamicRegion, fp.Manufacturer, fp.Device, fp.DevicePropsOs, fp.OsVersion,
-							fp.Mcc, fp.Mnc, fp.LocaleLanguage)
-					}
-					// 复制指纹结构体，避免并发修改
-					fpCopy := *fp
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-						defer cancel()
-						if saveErr := container.PutFingerprint(ctx, jid, &fpCopy); saveErr != nil {
-							cli.Log.Warnf("[Fingerprint] Failed to save new fingerprint for %s: %v", jid.User, saveErr)
-						} else {
-							cli.Log.Infof("[Fingerprint] Successfully saved new fingerprint for %s", jid.User)
-						}
-					}()
 				}
 			} else {
 				// 成功从数据库读取指纹，清除临时指纹（如果存在）
@@ -583,359 +619,43 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 		}
 
 		if fp != nil {
-			// 优先级：外部传入的运营商信息 > 手机号匹配 > 默认值
-			// 1. 优先使用外部传入的运营商信息（从代理 IP 探测获取）
-			// 记录原始值，用于判断是否需要更新数据库
-			originalMCC := fp.Mcc
-			originalMNC := fp.Mnc
-			originalCountry := fp.LocaleCountry
-			needsUpdate := false
+			// 1. 应用业务层传入的 MCC/MNC（如果已设置，允许只设置其中一个）
+			if carrierInfo != nil {
+				if carrierInfo.MCC != "" {
+					if fp.Mcc != carrierInfo.MCC {
+						if cli.Log != nil {
+							cli.Log.Debugf("[Fingerprint] Applying carrier MCC: %s -> %s", fp.Mcc, carrierInfo.MCC)
+						}
+						fp.Mcc = carrierInfo.MCC
+					}
+				}
+				if carrierInfo.MNC != "" {
+					if fp.Mnc != carrierInfo.MNC {
+						if cli.Log != nil {
+							cli.Log.Debugf("[Fingerprint] Applying carrier MNC: %s -> %s", fp.Mnc, carrierInfo.MNC)
+						}
+						fp.Mnc = carrierInfo.MNC
+					}
+				}
+			}
 
-			if carrierInfo != nil && carrierInfo.MCC != "" && carrierInfo.MNC != "" {
-				// 外部传入的运营商信息优先级最高，直接覆盖
-				if fp.Mcc != carrierInfo.MCC || fp.Mnc != carrierInfo.MNC {
+			// 2. 应用会话锁定的地理信息（如果已锁定，强制使用，禁止修改）
+			if sessionGeo != nil && sessionGeo.Locked {
+				if fp.LocaleCountry != sessionGeo.Country || fp.LocaleLanguage != sessionGeo.Language {
 					if cli.Log != nil {
-						cli.Log.Infof("[Fingerprint] Using carrier info from proxy IP: %s-%s (%s) -> overriding fingerprint MCC/MNC: %s-%s -> %s-%s",
-							carrierInfo.MCC, carrierInfo.MNC, carrierInfo.OperatorName, fp.Mcc, fp.Mnc, carrierInfo.MCC, carrierInfo.MNC)
+						cli.Log.Debugf("[Fingerprint] Applying session locked geo info: Country=%s->%s, Language=%s->%s",
+							fp.LocaleCountry, sessionGeo.Country, fp.LocaleLanguage, sessionGeo.Language)
 					}
-					fp.Mcc = carrierInfo.MCC
-					fp.Mnc = carrierInfo.MNC
-					needsUpdate = true
-				}
-				// 根据 MCC 同步 LocaleCountry，确保与 dynamicRegion 一致
-				countryFromMCC := fingerprint.GetCountryByMCC(carrierInfo.MCC)
-				if countryFromMCC != "" && fp.LocaleCountry != countryFromMCC {
-					if cli.Log != nil {
-						cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry with MCC: %s -> %s (MCC: %s)", fp.LocaleCountry, countryFromMCC, carrierInfo.MCC)
-					}
-					fp.LocaleCountry = countryFromMCC
-					needsUpdate = true
-				} else if countryFromMCC == "" && dynamicRegion != "" && fp.LocaleCountry != dynamicRegion {
-					// 如果无法从 MCC 推断国家，使用 dynamicRegion
-					if cli.Log != nil {
-						cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry with dynamicRegion: %s -> %s", fp.LocaleCountry, dynamicRegion)
-					}
-					fp.LocaleCountry = dynamicRegion
-					needsUpdate = true
-				}
-			} else {
-				// 2. 兜底策略：根据手机号段校准 MCC/MNC
-				// 注意：只在 MCC 为空或明显错误时才校准，避免覆盖已有效的 MCC/MNC
-				if phoneInfo := fingerprint.LookupPhoneRegion(phone); phoneInfo != nil {
-					// 只在以下情况校准：
-					// 1. MCC 为空
-					// 2. MCC 不是印度/巴西的有效值（404/405/724）
-					// 3. MCC 与号段完全不匹配（且不是 404/405 互换的情况）
-					shouldCalibrate := fp.Mcc == "" ||
-						(fp.LocaleCountry == "IN" && fp.Mcc != "404" && fp.Mcc != "405") ||
-						(fp.LocaleCountry == "BR" && fp.Mcc != "724")
-
-					// 对于印度，如果 MCC 已经是 404 或 405，且号段匹配也返回 404/405，则不强制覆盖
-					if fp.LocaleCountry == "IN" && (fp.Mcc == "404" || fp.Mcc == "405") {
-						if phoneInfo.MCC == "404" || phoneInfo.MCC == "405" {
-							shouldCalibrate = false // 保持现有值，避免不必要的覆盖
-						}
-					}
-
-					if shouldCalibrate {
-						if cli.Log != nil && (fp.Mcc != phoneInfo.MCC || fp.Mnc != phoneInfo.MNC) {
-							cli.Log.Debugf("[Fingerprint] Calibrating MCC/MNC for phone %s (fallback): %s-%s -> %s-%s (%s)",
-								phone, fp.Mcc, fp.Mnc, phoneInfo.MCC, phoneInfo.MNC, phoneInfo.OperatorName)
-						}
-						fp.Mcc = phoneInfo.MCC
-						fp.Mnc = phoneInfo.MNC
-						// 同步更新 LocaleCountry，确保与 MCC/MNC 一致
-						if phoneInfo.RegionCode != "" && fp.LocaleCountry != phoneInfo.RegionCode {
-							if cli.Log != nil {
-								cli.Log.Debugf("[Fingerprint] Syncing LocaleCountry: %s -> %s (based on MCC %s)", fp.LocaleCountry, phoneInfo.RegionCode, phoneInfo.MCC)
-							}
-							fp.LocaleCountry = phoneInfo.RegionCode
-						}
-						// 标记需要更新数据库（手机号校准也会修改指纹）
-						needsUpdate = true
-					} else if cli.Log != nil {
-						cli.Log.Debugf("[Fingerprint] MCC/MNC calibration skipped for phone %s: MCC=%s, MNC=%s (already valid)", phone, fp.Mcc, fp.Mnc)
-					}
+					fp.LocaleCountry = sessionGeo.Country
+					fp.LocaleLanguage = sessionGeo.Language
 				}
 			}
 
-			// 如果指纹有变化，更新数据库（避免旧指纹残留）
-			// 检查是否有实际变化（无论是否通过 carrierInfo 或手机号校准）
-			hasChanges := originalMCC != fp.Mcc || originalMNC != fp.Mnc || originalCountry != fp.LocaleCountry
-			if hasChanges {
-				// 如果 needsUpdate 为 false，说明是通过手机号校准修改的，也需要更新
-				if !needsUpdate {
-					needsUpdate = true
-				}
-			}
-			if needsUpdate && hasChanges {
-				// 确定要保存的 JID
-				saveJID := jid
-				if saveJID.IsEmpty() && cli.phoneLinkingCache != nil && !cli.phoneLinkingCache.jid.IsEmpty() {
-					saveJID = cli.phoneLinkingCache.jid
-				}
-				if !saveJID.IsEmpty() {
-					// 复制指纹结构体，避免并发修改
-					fpCopy := *fp
-					go func() {
-						ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-						defer cancel()
-						if saveErr := container.PutFingerprint(ctx, saveJID, &fpCopy); saveErr != nil {
-							cli.Log.Warnf("[Fingerprint] Failed to update fingerprint in database for %s: %v", saveJID.User, saveErr)
-						} else {
-							cli.Log.Infof("[Fingerprint] Updated fingerprint in database for %s: MCC=%s-%s, Country=%s", saveJID.User, fpCopy.Mcc, fpCopy.Mnc, fpCopy.LocaleCountry)
-						}
-					}()
-				}
-			}
+			// 3. 应用指纹到 Payload（regionCode 仅用于设备指纹生成）
+			fingerprint.ApplyFingerprint(payload, fp, regionCodeForDevice)
 
-			// MCC/MNC 推断日志
-			if cli.Log != nil {
-				beforeMCC := fp.Mcc
-				beforeMNC := fp.Mnc
-				needsInference := (fp.Mcc != "" && fp.Mnc == "") || (fp.Mcc == "" && fp.Mnc != "")
-
-				if needsInference {
-					if fp.Mcc != "" && fp.Mnc == "" {
-						inferredMNC := fingerprint.InferMNCFromMCC(fp.Mcc)
-						if inferredMNC != "" {
-							cli.Log.Debugf("[Fingerprint] Inferring MNC from MCC: MCC=%s -> MNC=%s", fp.Mcc, inferredMNC)
-						}
-					} else if fp.Mnc != "" && fp.Mcc == "" {
-						countryForInference := fp.LocaleCountry
-						if countryForInference == "" {
-							countryForInference = dynamicRegion
-						}
-						if countryForInference != "" {
-							inferredMCC := fingerprint.InferMCCFromMNC(fp.Mnc, countryForInference)
-							if inferredMCC != "" {
-								cli.Log.Debugf("[Fingerprint] Inferring MCC from MNC: MNC=%s, Country=%s -> MCC=%s", fp.Mnc, countryForInference, inferredMCC)
-							}
-						}
-					}
-				}
-
-				// 验证 MCC/MNC 组合
-				if fp.Mcc != "" && fp.Mnc != "" {
-					// MNC=000 是固定宽带的合法值，不发出警告
-					if fp.Mnc == "000" {
-						if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
-							cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s (fixed broadband)", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
-						}
-					} else {
-						isValid := fingerprint.ValidateMCCMNC(fp.Mcc, fp.Mnc)
-						if !isValid {
-							cli.Log.Warnf("[Fingerprint] Invalid MCC/MNC combination: %s-%s, will be corrected during ApplyFingerprint", fp.Mcc, fp.Mnc)
-						} else if beforeMCC != fp.Mcc || beforeMNC != fp.Mnc {
-							cli.Log.Debugf("[Fingerprint] MCC/MNC updated: %s-%s -> %s-%s", beforeMCC, beforeMNC, fp.Mcc, fp.Mnc)
-						}
-					}
-				}
-			}
-
-			// 记录应用指纹前的状态
-			var beforeMCC, beforeMNC, beforeCountry, beforeLanguage, beforePlatform string
-			var beforeWebInfo bool
-			if cli.Log != nil {
-				if payload.UserAgent != nil {
-					if payload.UserAgent.Mcc != nil {
-						beforeMCC = payload.UserAgent.GetMcc()
-					}
-					if payload.UserAgent.Mnc != nil {
-						beforeMNC = payload.UserAgent.GetMnc()
-					}
-					if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-						beforeCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-					}
-					if payload.UserAgent.LocaleLanguageIso6391 != nil {
-						beforeLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
-					}
-					if payload.UserAgent.Platform != nil {
-						beforePlatform = payload.UserAgent.Platform.String()
-					}
-				}
-				if payload.WebInfo != nil {
-					beforeWebInfo = true
-				}
-
-				cli.Log.Debugf("[Fingerprint] Before ApplyFingerprint: MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, WebInfo=%v, Region=%s",
-					beforeMCC, beforeMNC, beforeCountry, beforeLanguage, beforePlatform, beforeWebInfo, dynamicRegion)
-				cli.Log.Debugf("[Fingerprint] Fingerprint data: MCC=%s, MNC=%s, Country=%s, Language=%s, Device=%s, OS=%s",
-					fp.Mcc, fp.Mnc, fp.LocaleCountry, fp.LocaleLanguage, fp.Device, fp.DevicePropsOs)
-			}
-
-			fingerprint.ApplyFingerprint(payload, fp, dynamicRegion)
-
-			// 最后的安全网：再次调用 sanitizeClientPayload 确保清理完整（流程闭环）
-			// 因为 ApplyFingerprint 可能会修改 payload，需要再次清理
+			// 4. 最终清理：确保字段完整性（流程闭环）
 			payload = store.SanitizeClientPayload(payload)
-
-			// 记录应用指纹后的状态和关键修复
-			if cli.Log != nil {
-				afterMCC := ""
-				afterMNC := ""
-				afterCountry := ""
-				afterLanguage := ""
-				afterPlatform := ""
-				afterWebInfo := false
-				afterWebSubPlatform := ""
-				afterDevice := ""
-				afterManufacturer := ""
-				afterOsVersion := ""
-				cleanedFields := []string{}
-
-				if payload.UserAgent != nil {
-					if payload.UserAgent.Mcc != nil {
-						afterMCC = payload.UserAgent.GetMcc()
-					}
-					if payload.UserAgent.Mnc != nil {
-						afterMNC = payload.UserAgent.GetMnc()
-					}
-					if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-						afterCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-					}
-					if payload.UserAgent.LocaleLanguageIso6391 != nil {
-						afterLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
-					}
-					if payload.UserAgent.Platform != nil {
-						afterPlatform = payload.UserAgent.Platform.String()
-					}
-					if payload.UserAgent.Device != nil {
-						afterDevice = payload.UserAgent.GetDevice()
-					}
-					if payload.UserAgent.Manufacturer != nil {
-						afterManufacturer = payload.UserAgent.GetManufacturer()
-					}
-					if payload.UserAgent.OsVersion != nil {
-						afterOsVersion = payload.UserAgent.GetOsVersion()
-					}
-					// 检查清理的字段
-					if payload.UserAgent.OsBuildNumber == nil {
-						cleanedFields = append(cleanedFields, "OsBuildNumber")
-					}
-					if payload.UserAgent.DeviceBoard == nil {
-						cleanedFields = append(cleanedFields, "DeviceBoard")
-					}
-					if payload.UserAgent.DeviceModelType == nil {
-						cleanedFields = append(cleanedFields, "DeviceModelType")
-					}
-				}
-				if payload.WebInfo != nil {
-					afterWebInfo = true
-					if payload.WebInfo.WebSubPlatform != nil {
-						afterWebSubPlatform = payload.WebInfo.WebSubPlatform.String()
-					}
-				}
-
-				// 记录关键变化
-				changes := []string{}
-				if beforeMCC != afterMCC {
-					changes = append(changes, fmt.Sprintf("MCC: %s->%s", beforeMCC, afterMCC))
-				}
-				if beforeMNC != afterMNC {
-					changes = append(changes, fmt.Sprintf("MNC: %s->%s", beforeMNC, afterMNC))
-				}
-				if beforeCountry != afterCountry {
-					changes = append(changes, fmt.Sprintf("Country: %s->%s", beforeCountry, afterCountry))
-				}
-				if beforeLanguage != afterLanguage {
-					changes = append(changes, fmt.Sprintf("Language: %s->%s", beforeLanguage, afterLanguage))
-				}
-				if !beforeWebInfo && afterWebInfo {
-					changes = append(changes, "WebInfo: created")
-				}
-
-				cli.Log.Infof("[Fingerprint] After ApplyFingerprint: MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, Device=%s, Manufacturer=%s, OS=%s",
-					afterMCC, afterMNC, afterCountry, afterLanguage, afterPlatform, afterDevice, afterManufacturer, afterOsVersion)
-				if afterWebInfo {
-					cli.Log.Infof("[Fingerprint] WebInfo: WebSubPlatform=%s", afterWebSubPlatform)
-				}
-				if len(cleanedFields) > 0 {
-					cli.Log.Debugf("[Fingerprint] Cleaned mobile fields: %v", cleanedFields)
-				}
-				if len(changes) > 0 {
-					cli.Log.Infof("[Fingerprint] Applied changes: %v", changes)
-				}
-
-				// 验证关键字段
-				validationIssues := []string{}
-				if payload.UserAgent != nil {
-					if payload.UserAgent.Mcc == nil || payload.UserAgent.Mnc == nil {
-						validationIssues = append(validationIssues, "MCC/MNC missing")
-					}
-					if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
-						validationIssues = append(validationIssues, "LocaleCountry missing")
-					}
-					if payload.UserAgent.LocaleLanguageIso6391 == nil {
-						validationIssues = append(validationIssues, "LocaleLanguage missing")
-					}
-					if payload.UserAgent.Platform == nil {
-						validationIssues = append(validationIssues, "Platform missing")
-					}
-					if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
-						if payload.UserAgent.OsBuildNumber != nil {
-							validationIssues = append(validationIssues, "WEB platform has OsBuildNumber (should be nil)")
-						}
-						if payload.UserAgent.DeviceBoard != nil {
-							validationIssues = append(validationIssues, "WEB platform has DeviceBoard (should be nil)")
-						}
-						if payload.UserAgent.DeviceModelType != nil {
-							validationIssues = append(validationIssues, "WEB platform has DeviceModelType (should be nil)")
-						}
-						if payload.UserAgent.GetDevice() != "Desktop" {
-							validationIssues = append(validationIssues, fmt.Sprintf("WEB platform Device=%s (should be Desktop)", payload.UserAgent.GetDevice()))
-						}
-					}
-				}
-				if payload.WebInfo == nil {
-					validationIssues = append(validationIssues, "WebInfo missing")
-				} else if payload.WebInfo.WebSubPlatform == nil {
-					validationIssues = append(validationIssues, "WebInfo.WebSubPlatform missing")
-				}
-
-				if len(validationIssues) > 0 {
-					cli.Log.Warnf("[Fingerprint] Validation issues found: %v", validationIssues)
-				} else {
-					cli.Log.Debugf("[Fingerprint] Validation passed: all required fields are set correctly")
-				}
-			}
-		}
-
-		// 记录最终 Payload 状态（包括 sanitizeClientPayload 的修改）
-		// 这是发送给服务器的最终 Payload，用于验证流程完整性
-		if cli.Log != nil && payload != nil && payload.UserAgent != nil {
-			finalMCC := ""
-			finalMNC := ""
-			finalCountry := ""
-			finalLanguage := ""
-			finalPlatform := ""
-			finalDevice := ""
-			finalWebInfo := false
-
-			if payload.UserAgent.Mcc != nil {
-				finalMCC = payload.UserAgent.GetMcc()
-			}
-			if payload.UserAgent.Mnc != nil {
-				finalMNC = payload.UserAgent.GetMnc()
-			}
-			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-				finalCountry = payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-			}
-			if payload.UserAgent.LocaleLanguageIso6391 != nil {
-				finalLanguage = payload.UserAgent.GetLocaleLanguageIso6391()
-			}
-			if payload.UserAgent.Platform != nil {
-				finalPlatform = payload.UserAgent.Platform.String()
-			}
-			if payload.UserAgent.Device != nil {
-				finalDevice = payload.UserAgent.GetDevice()
-			}
-			if payload.WebInfo != nil {
-				finalWebInfo = true
-			}
-
-			cli.Log.Infof("[Fingerprint] Final Payload (ready to send): MCC=%s, MNC=%s, Country=%s, Language=%s, Platform=%s, Device=%s, WebInfo=%v",
-				finalMCC, finalMNC, finalCountry, finalLanguage, finalPlatform, finalDevice, finalWebInfo)
 		}
 
 		return payload
@@ -943,37 +663,45 @@ func setupFingerprintIfEnabled(cli *Client, deviceStore *store.Device) {
 }
 
 // SetCarrierInfo 设置外部传入的运营商信息（从代理 IP 探测获取）
-// 优先级：外部传入 > 手机号匹配 > 默认值
-// 如果业务层通过前置探测获取到代理 IP 的运营商信息，应调用此方法设置
+// 业务层通过前置探测获取到代理 IP 的运营商信息后，应调用此方法设置
 // 参数：
-//   - mcc: 移动国家代码 (如 "404", "405", "724")
-//   - mnc: 移动网络代码 (如 "10", "20", "874")
-//   - operatorName: 运营商名称 (如 "Airtel", "Jio", "Vivo")
-func (cli *Client) SetCarrierInfo(mcc, mnc, operatorName string) {
+//   - mcc: 移动国家代码 (如 "404", "405", "724")，如果为空字符串，将清除已设置的 MCC
+//   - mnc: 移动网络代码，如果为空字符串，将清除已设置的 MNC（如果都为空，将在应用指纹时按优先级设置）
+func (cli *Client) SetCarrierInfo(mcc, mnc string) {
 	cli.carrierInfoLock.Lock()
 	defer cli.carrierInfoLock.Unlock()
 
 	// 检查是否有变更
 	hasChange := false
 	if cli.carrierInfo == nil {
-		hasChange = (mcc != "" && mnc != "")
+		hasChange = (mcc != "" || mnc != "")
 	} else {
 		hasChange = (cli.carrierInfo.MCC != mcc || cli.carrierInfo.MNC != mnc)
 	}
 
-	if mcc != "" && mnc != "" {
-		cli.carrierInfo = &CarrierInfo{
-			MCC:          mcc,
-			MNC:          mnc,
-			OperatorName: operatorName,
+	// 允许只设置 MCC 或只设置 MNC
+	if mcc != "" || mnc != "" {
+		if cli.carrierInfo == nil {
+			cli.carrierInfo = &CarrierInfo{}
+		}
+		if mcc != "" {
+			cli.carrierInfo.MCC = mcc
+		} else {
+			cli.carrierInfo.MCC = "" // 如果传入空字符串，清除 MCC
+		}
+		if mnc != "" {
+			cli.carrierInfo.MNC = mnc
+		} else {
+			cli.carrierInfo.MNC = "" // 如果传入空字符串，清除 MNC
 		}
 		if cli.Log != nil {
-			cli.Log.Infof("[Fingerprint] Set carrier info from proxy IP: MCC=%s, MNC=%s, Operator=%s", mcc, mnc, operatorName)
+			cli.Log.Infof("[Fingerprint] Set carrier info from proxy IP: MCC=%s, MNC=%s", cli.carrierInfo.MCC, cli.carrierInfo.MNC)
 			if hasChange && cli.socket != nil {
-				cli.Log.Warnf("[Fingerprint] Carrier info changed while connected (MCC=%s, MNC=%s). Consider reconnecting to apply new MCC/MNC", mcc, mnc)
+				cli.Log.Warnf("[Fingerprint] Carrier info changed while connected (MCC=%s, MNC=%s). Consider reconnecting to apply new MCC/MNC", cli.carrierInfo.MCC, cli.carrierInfo.MNC)
 			}
 		}
 	} else {
+		// 如果 MCC 和 MNC 都为空，清除 carrierInfo
 		cli.carrierInfo = nil
 		if cli.Log != nil {
 			cli.Log.Debugf("[Fingerprint] Cleared carrier info (empty MCC/MNC provided)")
@@ -991,10 +719,300 @@ func (cli *Client) GetCarrierInfo() *CarrierInfo {
 	}
 	// 返回副本，避免外部修改导致并发问题
 	return &CarrierInfo{
-		MCC:          cli.carrierInfo.MCC,
-		MNC:          cli.carrierInfo.MNC,
-		OperatorName: cli.carrierInfo.OperatorName,
+		MCC: cli.carrierInfo.MCC,
+		MNC: cli.carrierInfo.MNC,
 	}
+}
+
+// getTimezoneByCountry 根据国家代码推断时区（兜底逻辑）
+// 业务层应该通过 SetUserLoginGeoInfo 传入准确的时区
+func getTimezoneByCountry(country string) string {
+	timezoneMap := map[string]string{
+		"IN": "Asia/Kolkata",         // 印度
+		"BR": "America/Sao_Paulo",    // 巴西
+		"US": "America/New_York",     // 美国
+		"GB": "Europe/London",        // 英国
+		"CA": "America/Toronto",      // 加拿大
+		"AU": "Australia/Sydney",     // 澳大利亚
+		"NZ": "Pacific/Auckland",     // 新西兰
+		"CN": "Asia/Shanghai",        // 中国
+		"TW": "Asia/Taipei",          // 台湾
+		"HK": "Asia/Hong_Kong",       // 香港
+		"SG": "Asia/Singapore",       // 新加坡
+		"ES": "Europe/Madrid",        // 西班牙
+		"MX": "America/Mexico_City",  // 墨西哥
+		"AR": "America/Buenos_Aires", // 阿根廷
+		"CO": "America/Bogota",       // 哥伦比亚
+		"FR": "Europe/Paris",         // 法国
+		"DE": "Europe/Berlin",        // 德国
+		"AT": "Europe/Vienna",        // 奥地利
+		"JP": "Asia/Tokyo",           // 日本
+		"KR": "Asia/Seoul",           // 韩国
+	}
+	if tz, ok := timezoneMap[country]; ok {
+		return tz
+	}
+	// 默认返回 UTC（如果国家代码未匹配）
+	return "UTC"
+}
+
+// SetUserLoginGeoInfo 设置用户登录Web端IP的地理信息（每次匹配时传入）
+// 业务层在每次匹配/登录时调用此方法传入用户真实地理位置
+// 参数：
+//   - country: 国家代码，如 "IN", "BR"
+//   - timezone: 时区，如 "Asia/Kolkata"（仅用于会话锁定，不写入Payload）
+//   - language: 语言代码，如 "hi", "pt", "en"
+//
+// 首次设置后会话内锁定，禁止修改；断开连接时清除锁定；重登时允许重新设置
+func (cli *Client) SetUserLoginGeoInfo(country, timezone, language string) {
+	if country == "" {
+		if cli.Log != nil {
+			cli.Log.Warnf("[Fingerprint] SetUserLoginGeoInfo: country is empty, ignoring")
+		}
+		return
+	}
+
+	cli.sessionGeoLock.Lock()
+	defer cli.sessionGeoLock.Unlock()
+
+	cli.sessionGeoCache = &SessionGeoCache{
+		Country:  country,
+		Timezone: timezone,
+		Language: language,
+		Locked:   true,
+	}
+
+	if cli.Log != nil {
+		cli.Log.Infof("[Fingerprint] Set user login geo info: Country=%s, Timezone=%s, Language=%s (locked)", country, timezone, language)
+	}
+}
+
+// getSessionGeoCache 获取会话地理信息缓存（线程安全）
+func (cli *Client) getSessionGeoCache() *SessionGeoCache {
+	cli.sessionGeoLock.RLock()
+	defer cli.sessionGeoLock.RUnlock()
+	if cli.sessionGeoCache == nil || !cli.sessionGeoCache.Locked {
+		return nil
+	}
+	// 返回副本，避免外部修改
+	return &SessionGeoCache{
+		Country:  cli.sessionGeoCache.Country,
+		Timezone: cli.sessionGeoCache.Timezone,
+		Language: cli.sessionGeoCache.Language,
+		Locked:   cli.sessionGeoCache.Locked,
+	}
+}
+
+// clearSessionGeoCache 清除会话地理信息缓存（断开连接时调用）
+func (cli *Client) clearSessionGeoCache() {
+	cli.sessionGeoLock.Lock()
+	defer cli.sessionGeoLock.Unlock()
+	if cli.sessionGeoCache != nil {
+		if cli.Log != nil {
+			cli.Log.Debugf("[Fingerprint] Cleared session geo cache: Country=%s, Timezone=%s, Language=%s", cli.sessionGeoCache.Country, cli.sessionGeoCache.Timezone, cli.sessionGeoCache.Language)
+		}
+		cli.sessionGeoCache = nil
+	}
+}
+
+// validateClientPayload 校验 Payload 是否符合方案要求
+// 返回错误列表（如果有不一致的字段）
+func (cli *Client) validateClientPayload(payload *waWa6.ClientPayload) error {
+	if payload == nil {
+		return fmt.Errorf("payload is nil")
+	}
+
+	var issues []string
+	ua := payload.UserAgent
+	if ua == nil {
+		return fmt.Errorf("UserAgent is nil")
+	}
+
+	// 1. 地理一致性校验
+	country := ua.GetLocaleCountryIso31661Alpha2()
+	language := ua.GetLocaleLanguageIso6391()
+	if country != "" && language != "" {
+		// 检查语言与国家匹配（如 "IN" ↔ "hi", "BR" ↔ "pt"）
+		if !isLanguageCountryMatch(language, country) {
+			issues = append(issues, fmt.Sprintf("Language-Country mismatch: %s-%s", language, country))
+		}
+	}
+
+	// 2. 网络一致性校验
+	if ua.GetMnc() != "000" {
+		issues = append(issues, fmt.Sprintf("MNC=%s (should be 000)", ua.GetMnc()))
+	}
+	if country != "" && ua.GetMcc() != "" {
+		// 检查 MCC 与 Country 匹配（如 "404" ↔ "IN", "724" ↔ "BR"）
+		if !isMCCCountryMatch(ua.GetMcc(), country) {
+			issues = append(issues, fmt.Sprintf("MCC-Country mismatch: MCC=%s, Country=%s", ua.GetMcc(), country))
+		}
+	}
+
+	// 3. 平台一致性校验
+	if ua.GetPlatform() != waWa6.ClientPayload_UserAgent_WEB {
+		issues = append(issues, fmt.Sprintf("Platform=%v (should be WEB)", ua.GetPlatform()))
+	}
+	if ua.GetDeviceType() != waWa6.ClientPayload_UserAgent_DESKTOP {
+		issues = append(issues, fmt.Sprintf("DeviceType=%v (should be DESKTOP)", ua.GetDeviceType()))
+	}
+	if payload.WebInfo == nil || payload.WebInfo.GetWebSubPlatform() != waWa6.ClientPayload_WebInfo_WEB_BROWSER {
+		issues = append(issues, "WebInfo.WebSubPlatform should be WEB_BROWSER")
+	}
+
+	// 4. WEB 平台特征校验
+	if ua.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
+		if ua.OsBuildNumber != nil {
+			issues = append(issues, "OsBuildNumber should be nil for WEB platform")
+		}
+		if ua.DeviceBoard != nil {
+			issues = append(issues, "DeviceBoard should be nil for WEB platform")
+		}
+		if ua.DeviceModelType != nil {
+			issues = append(issues, "DeviceModelType should be nil for WEB platform")
+		}
+		if ua.GetDevice() != "Desktop" {
+			issues = append(issues, fmt.Sprintf("Device=%s (should be Desktop for WEB)", ua.GetDevice()))
+		}
+		if ua.PhoneID != nil {
+			issues = append(issues, "PhoneID should be nil for WEB platform")
+		}
+		if ua.DeviceExpID != nil {
+			issues = append(issues, "DeviceExpID should be nil for WEB platform")
+		}
+	}
+
+	// 5. 会话锁定校验
+	sessionGeo := cli.getSessionGeoCache()
+	if sessionGeo != nil && sessionGeo.Locked {
+		if ua.GetLocaleCountryIso31661Alpha2() != sessionGeo.Country {
+			issues = append(issues, fmt.Sprintf("Country mismatch with session cache: %s != %s", ua.GetLocaleCountryIso31661Alpha2(), sessionGeo.Country))
+		}
+		if ua.GetLocaleLanguageIso6391() != sessionGeo.Language {
+			issues = append(issues, fmt.Sprintf("Language mismatch with session cache: %s != %s", ua.GetLocaleLanguageIso6391(), sessionGeo.Language))
+		}
+	}
+
+	if len(issues) > 0 {
+		return fmt.Errorf("validation failed: %v", issues)
+	}
+	return nil
+}
+
+// fixClientPayload 修正 Payload 中的不一致字段（使用兜底值）
+func (cli *Client) fixClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
+	if payload == nil {
+		return nil
+	}
+
+	ua := payload.UserAgent
+	if ua == nil {
+		return payload
+	}
+
+	// 注意：不强制修正 MNC，因为外界可能设置移动宽带的 MNC
+	// MNC 的优先级已在 ApplyFingerprint 中处理：外界 > 地区配置 > "000" > 空
+
+	// 强制修正 WEB 平台特征
+	if ua.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
+		ua.OsBuildNumber = nil
+		ua.DeviceBoard = nil
+		ua.DeviceModelType = nil
+		ua.Device = proto.String("Desktop")
+		ua.PhoneID = nil
+		ua.DeviceExpID = nil
+	}
+
+	// 强制修正会话锁定的地理信息
+	sessionGeo := cli.getSessionGeoCache()
+	if sessionGeo != nil && sessionGeo.Locked {
+		ua.LocaleCountryIso31661Alpha2 = proto.String(sessionGeo.Country)
+		ua.LocaleLanguageIso6391 = proto.String(sessionGeo.Language)
+
+		// 修正 MCC 以匹配 Country（如果不匹配）
+		if ua.GetMcc() != "" && !isMCCCountryMatch(ua.GetMcc(), sessionGeo.Country) {
+			defaultMCC := fingerprint.GetDefaultMCCByCountry(sessionGeo.Country)
+			if cli.Log != nil {
+				cli.Log.Warnf("[Fingerprint] MCC-Country mismatch detected (MCC=%s, Country=%s), fixing to MCC=%s",
+					ua.GetMcc(), sessionGeo.Country, defaultMCC)
+			}
+			ua.Mcc = proto.String(defaultMCC)
+		}
+	}
+
+	// 强制修正 WebInfo
+	if payload.WebInfo == nil {
+		payload.WebInfo = &waWa6.ClientPayload_WebInfo{
+			WebSubPlatform: waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum(),
+		}
+	} else if payload.WebInfo.WebSubPlatform == nil {
+		payload.WebInfo.WebSubPlatform = waWa6.ClientPayload_WebInfo_WEB_BROWSER.Enum()
+	}
+
+	return payload
+}
+
+// isLanguageCountryMatch 检查语言与国家是否匹配
+func isLanguageCountryMatch(language, country string) bool {
+	matches := map[string][]string{
+		"hi": {"IN"},
+		"pt": {"BR"},
+		"en": {"US", "GB", "CA", "AU", "NZ"},
+		"es": {"ES", "MX", "AR", "CO"},
+		"fr": {"FR"},
+		"de": {"DE", "AT"},
+		"ja": {"JP"},
+		"ko": {"KR"},
+		"zh": {"CN", "TW", "HK", "SG"},
+	}
+	if countries, ok := matches[language]; ok {
+		for _, c := range countries {
+			if c == country {
+				return true
+			}
+		}
+	}
+	// 如果未匹配到，允许（可能是其他语言）
+	return true
+}
+
+// isMCCCountryMatch 检查 MCC 与国家是否匹配
+func isMCCCountryMatch(mcc, country string) bool {
+	mccMap := map[string]string{
+		// 印度 (India) - 2个MCC
+		"404": "IN", // 印度 GSM/UMTS/LTE (Airtel, Vodafone, BSNL等)
+		"405": "IN", // 印度 LTE/CDMA (Reliance Jio等)
+
+		// 巴西 (Brazil) - 1个MCC
+		"724": "BR", // 巴西 (TIM, Vivo, Claro, Oi等)
+
+		// 其他国家
+		"310": "US", // 美国
+		"234": "GB", // 英国
+		"302": "CA", // 加拿大
+		"505": "AU", // 澳大利亚
+		"530": "NZ", // 新西兰
+		"460": "CN", // 中国
+		"466": "TW", // 台湾
+		"454": "HK", // 香港
+		"525": "SG", // 新加坡
+		"214": "ES", // 西班牙
+		"334": "MX", // 墨西哥
+		"722": "AR", // 阿根廷
+		"732": "CO", // 哥伦比亚
+		"208": "FR", // 法国
+		"206": "BE", // 比利时
+		"228": "CH", // 瑞士
+		"262": "DE", // 德国
+		"232": "AT", // 奥地利
+		"440": "JP", // 日本
+		"450": "KR", // 韩国
+	}
+	if expectedCountry, ok := mccMap[mcc]; ok {
+		return expectedCountry == country
+	}
+	// 如果未匹配到，允许（可能是其他MCC）
+	return true
 }
 
 // SetProxyAddress is a helper method that parses a URL string and calls SetProxy or SetSOCKSProxy based on the URL scheme.
@@ -1358,8 +1376,10 @@ func (cli *Client) Disconnect() {
 	if hadPending && cli.Log != nil {
 		cli.Log.Infof("[Fingerprint] Disconnect: cleared pending fingerprint from memory (database fingerprints preserved)")
 	}
+	// 清除会话地理信息缓存（重登时允许重新设置）
+	cli.clearSessionGeoCache()
 	// 注意：不清理 carrierInfo，因为它是外部传入的，可能需要在下次连接时继续使用
-	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "", "")
+	// 如果业务层需要清理，可以显式调用 SetCarrierInfo("", "")
 }
 
 // ResetConnection disconnects from the WhatsApp web websocket and forces an automatic reconnection.

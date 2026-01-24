@@ -14,11 +14,35 @@ import (
 	"net/http"
 	"strings"
 
+	"google.golang.org/protobuf/proto"
+
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 )
+
+// mapWebSubPlatformToPlatformType 将 WebSubPlatform 映射到 PlatformType
+// 确保 WebInfo.WebSubPlatform 与 DeviceProps.PlatformType 逻辑一致
+func mapWebSubPlatformToPlatformType(webSubPlatform waWa6.ClientPayload_WebInfo_WebSubPlatform) waCompanionReg.DeviceProps_PlatformType {
+	switch webSubPlatform {
+	case waWa6.ClientPayload_WebInfo_WEB_BROWSER:
+		// WEB_BROWSER → CHROME（浏览器）
+		return waCompanionReg.DeviceProps_CHROME
+	case waWa6.ClientPayload_WebInfo_WIN_STORE, waWa6.ClientPayload_WebInfo_WIN32, waWa6.ClientPayload_WebInfo_WIN_HYBRID:
+		// Windows 桌面应用 → DESKTOP
+		return waCompanionReg.DeviceProps_DESKTOP
+	case waWa6.ClientPayload_WebInfo_DARWIN:
+		// macOS 应用 → CATALINA（Safari）
+		return waCompanionReg.DeviceProps_CATALINA
+	case waWa6.ClientPayload_WebInfo_APP_STORE:
+		// 应用商店版本 → DESKTOP
+		return waCompanionReg.DeviceProps_DESKTOP
+	default:
+		// 默认使用 CHROME
+		return waCompanionReg.DeviceProps_CHROME
+	}
+}
 
 // generateUserAgent 根据 Payload 信息生成浏览器 User-Agent 字符串
 // 优先从 ClientPayload 中提取，确保与握手包 100% 一致
@@ -64,10 +88,16 @@ func (cli *Client) generateUserAgent() string {
 		country = ua.GetLocaleCountryIso31661Alpha2()
 	}
 
-	// 从 PlatformType 推断
+	// 从 WebSubPlatform 映射到 PlatformType（确保一致性）
 	platformType := waCompanionReg.DeviceProps_CHROME
-	if payload.WebInfo != nil {
-		// TODO: WebSubPlatform 映射到 DeviceProps_PlatformType
+	if payload.WebInfo != nil && payload.WebInfo.WebSubPlatform != nil {
+		platformType = mapWebSubPlatformToPlatformType(payload.WebInfo.GetWebSubPlatform())
+	} else if payload.DevicePairingData != nil && len(payload.DevicePairingData.DeviceProps) > 0 {
+		// 如果 WebInfo 不存在，尝试从 DeviceProps 获取 PlatformType
+		var deviceProps waCompanionReg.DeviceProps
+		if err := proto.Unmarshal(payload.DevicePairingData.DeviceProps, &deviceProps); err == nil && deviceProps.PlatformType != nil {
+			platformType = deviceProps.GetPlatformType()
+		}
 	}
 
 	return generateBrowserUserAgentWithSeedAndCountry(platformType, osName, ua.GetOsVersion(), seed, country)
@@ -325,10 +355,16 @@ func (cli *Client) generateAcceptLanguage() string {
 	// 根据地区添加次要语言，并添加细微的随机性
 	switch country {
 	case "IN":
-		// 印度本地语种：不再包含 en
+		// 印度本地语种：包含本地语言和 en（真实印度用户通常有 en 作为备选）
 		// 随机微调 q 值：0.85-0.95
 		q1 := 0.85 + r.Float64()*0.1
-		return fmt.Sprintf("%s-IN,%s;q=%.2f", lang, lang, q1)
+		q2 := 0.75 + r.Float64()*0.1
+		if lang == "en" {
+			// 如果主语言是 en，只返回 en
+			return fmt.Sprintf("en-IN,en;q=%.2f", q1)
+		}
+		// 本地语言 + en（例如：hi-IN,hi;q=0.90,en;q=0.80）
+		return fmt.Sprintf("%s-IN,%s;q=%.2f,en;q=%.2f", lang, lang, q1, q2)
 	case "BR":
 		// 巴西：包含 pt-BR 和可能的 en-US
 		if lang == "en" {

@@ -338,6 +338,9 @@ func SanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 		payload.UserAgent.DeviceModelType = nil
 		// 强制锁定桌面设备名称
 		payload.UserAgent.Device = proto.String("Desktop")
+		// Web平台强制置空 PhoneID 和 DeviceExpID（避免泄露移动端特征）
+		payload.UserAgent.PhoneID = nil
+		payload.UserAgent.DeviceExpID = nil
 	}
 
 	// L5: 彻底禁止 whatsmeow 特征泄露
@@ -349,111 +352,18 @@ func SanitizeClientPayload(payload *waWa6.ClientPayload) *waWa6.ClientPayload {
 			payload.UserAgent.Device = proto.String("Desktop")
 		}
 
-		// 最终安全网：确保必填字段不为 nil
-		// 注意：优先使用已设置的值，避免覆盖指纹模块的设置
-		// 优先级：MCC -> LocaleCountry（如果 MCC 已设置，根据 MCC 推断 LocaleCountry）
-		if payload.UserAgent.Mcc == nil {
-			// 如果 MCC 为空，根据 LocaleCountry 推断 MCC
-			// 注意：如果 MNC=000（固定宽带），保留 MNC=000，只设置 MCC
-			if payload.UserAgent.Mnc != nil && payload.UserAgent.GetMnc() == "000" {
-				// MNC=000 是固定宽带，无法从 MNC 推断 MCC，使用兜底地区
-				if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-					country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-					switch country {
-					case "BR":
-						payload.UserAgent.Mcc = proto.String("724")
-					case "IN":
-						payload.UserAgent.Mcc = proto.String("404")
-					default:
-						// 未知国家，使用印度默认（向后兼容）
-						payload.UserAgent.Mcc = proto.String("404")
-					}
-				} else {
-					// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
-					payload.UserAgent.Mcc = proto.String("404")
-				}
-				// MNC=000 保持不变
-			} else {
-				// 正常情况：根据 LocaleCountry 推断 MCC/MNC
-				if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
-					country := payload.UserAgent.GetLocaleCountryIso31661Alpha2()
-					switch country {
-					case "BR":
-						payload.UserAgent.Mcc = proto.String("724")
-						if payload.UserAgent.Mnc == nil {
-							payload.UserAgent.Mnc = proto.String("02")
-						}
-					case "IN":
-						payload.UserAgent.Mcc = proto.String("404")
-						if payload.UserAgent.Mnc == nil {
-							payload.UserAgent.Mnc = proto.String("01")
-						}
-					default:
-						// 未知国家，使用印度默认（向后兼容）
-						payload.UserAgent.Mcc = proto.String("404")
-						if payload.UserAgent.Mnc == nil {
-							payload.UserAgent.Mnc = proto.String("01")
-						}
-					}
-				} else {
-					// 如果连 LocaleCountry 都没有，使用印度默认（向后兼容）
-					payload.UserAgent.Mcc = proto.String("404")
-					if payload.UserAgent.Mnc == nil {
-						payload.UserAgent.Mnc = proto.String("01")
-					}
-				}
-			}
-		} else {
-			// 如果 MCC 已设置，确保 LocaleCountry 与 MCC 一致
-			if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
-				mcc := payload.UserAgent.GetMcc()
-				switch mcc {
-				case "404", "405":
-					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
-				case "724":
-					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("BR")
-				}
-			}
-		}
+		// 最终安全网：确保必填字段不为 nil（流程闭环）
+		// 注意：业务层应通过 SetUserLoginGeoInfo 和 SetCarrierInfo 传入所有必要数据
+		// 这里仅做基本的字段完整性检查，不进行推断
 		if payload.UserAgent.Mnc == nil {
-			// 如果 MCC 已设置但 MNC 为空，设置默认 MNC
-			if payload.UserAgent.Mcc != nil {
-				mcc := payload.UserAgent.GetMcc()
-				switch mcc {
-				case "724":
-					payload.UserAgent.Mnc = proto.String("02")
-				case "404", "405":
-					payload.UserAgent.Mnc = proto.String("01")
-				default:
-					payload.UserAgent.Mnc = proto.String("01")
-				}
-			} else {
-				payload.UserAgent.Mnc = proto.String("01")
-			}
+			// 强制 MNC=000（固定宽带）
+			payload.UserAgent.Mnc = proto.String("000")
 		}
 		if payload.UserAgent.OsVersion == nil {
 			payload.UserAgent.OsVersion = proto.String("10.0.0")
 		}
 		if payload.UserAgent.LocaleLanguageIso6391 == nil {
 			payload.UserAgent.LocaleLanguageIso6391 = proto.String("en")
-		}
-		if payload.UserAgent.LocaleCountryIso31661Alpha2 == nil {
-			// 根据 MCC 推断 LocaleCountry，而不是硬编码为 IN
-			if payload.UserAgent.Mcc != nil {
-				mcc := payload.UserAgent.GetMcc()
-				switch mcc {
-				case "724":
-					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("BR")
-				case "404", "405":
-					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
-				default:
-					// 未知 MCC，使用印度默认（向后兼容）
-					payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
-				}
-			} else {
-				// 如果连 MCC 都没有，使用印度默认（向后兼容）
-				payload.UserAgent.LocaleCountryIso31661Alpha2 = proto.String("IN")
-			}
 		}
 	}
 	return payload

@@ -244,6 +244,17 @@ func (cli *Client) handlePair(ctx context.Context, deviceIdentityBytes []byte, r
 				cli.Log.Infof("[Fingerprint] Migrating fingerprint to JID %s (fingerprint: %s %s, MCC: %s, MNC: %s)",
 					jid.User, pendingFP.Manufacturer, pendingFP.Device, pendingFP.Mcc, pendingFP.Mnc)
 			}
+			// 配对成功后设置会话地理信息缓存（如果指纹中有地理信息）
+			// 注意：业务层应该已经通过 SetUserLoginGeoInfo 设置了地理信息，这里作为兜底
+			if pendingFP.LocaleCountry != "" && pendingFP.LocaleLanguage != "" {
+				// 从国家代码推断时区（兜底逻辑）
+				timezone := getTimezoneByCountry(pendingFP.LocaleCountry)
+				cli.SetUserLoginGeoInfo(pendingFP.LocaleCountry, timezone, pendingFP.LocaleLanguage)
+				if cli.Log != nil {
+					cli.Log.Infof("[Fingerprint] Set session geo cache from fingerprint: Country=%s, Timezone=%s, Language=%s",
+						pendingFP.LocaleCountry, timezone, pendingFP.LocaleLanguage)
+				}
+			}
 			// 复制指纹结构体，避免并发修改
 			fpCopy := *pendingFP
 			go func() {

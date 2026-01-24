@@ -218,11 +218,9 @@ func init() {
             },
         },
         
-        // 3. 移动网络配置（MCC/MNC）
+        // 3. 移动网络配置（MCC）
         MobileNetworks: []fingerprint.MobileNetworkConfig{
-            {MCC: "334", MNC: "020", OperatorName: "Telcel", Weight: 0.50},
-            {MCC: "334", MNC: "030", OperatorName: "Movistar", Weight: 0.30},
-            {MCC: "334", MNC: "050", OperatorName: "AT&T", Weight: 0.20},
+            {MCC: "334", Weight: 1.0},
         },
         
         // 4. 设备型号池（按制造商）

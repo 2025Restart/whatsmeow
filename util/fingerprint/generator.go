@@ -183,23 +183,26 @@ func selectOSVersion(platformDist PlatformDistribution) string {
 
 // selectMobileNetwork 选择移动网络（MCC/MNC）
 func selectMobileNetwork(config *RegionConfig, country string) (mcc, mnc string) {
+	// MNC：固定为 "000"（固定宽带）
+	mnc = "000"
+	
+	// MCC：如果没有地区配置，使用默认MCC；否则根据权重随机选择
 	if len(config.MobileNetworks) == 0 {
-		// 使用默认 MCC/MNC
-		return getDefaultMCCByCountry(country), "001"
+		return GetDefaultMCCByCountry(country), mnc
 	}
-
-	// 根据权重随机选择
+	
+	// 根据权重随机选择 MCC
 	r := mathRand.Float64()
 	var cumWeight float64
 	for _, net := range config.MobileNetworks {
 		cumWeight += net.Weight
 		if r <= cumWeight {
-			return net.MCC, net.MNC
+			return net.MCC, mnc
 		}
 	}
-
+	
 	// 如果权重总和不足1，返回第一个
-	return config.MobileNetworks[0].MCC, config.MobileNetworks[0].MNC
+	return config.MobileNetworks[0].MCC, mnc
 }
 
 // buildFingerprint 构建设备指纹
@@ -415,8 +418,8 @@ func parseVersion(version string) uint32 {
 	return v
 }
 
-// getDefaultMCCByCountry 根据国家获取默认 MCC
-func getDefaultMCCByCountry(country string) string {
+// GetDefaultMCCByCountry 根据国家获取默认 MCC（公开函数，供外部调用）
+func GetDefaultMCCByCountry(country string) string {
 	mccMap := map[string]string{
 		"US": "310", "GB": "234", "CA": "302", "AU": "505", "NZ": "530",
 		"CN": "460", "TW": "466", "HK": "454", "SG": "525",

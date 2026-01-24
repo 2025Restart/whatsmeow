@@ -34,7 +34,7 @@ func init() {
 	},
 
 		MobileNetworks: []fingerprint.MobileNetworkConfig{
-			{MCC: "310", MNC: "260", OperatorName: "T-Mobile", Weight: 1.0},
+			{MCC: "310", Weight: 1.0},
 		},
 
 		DeviceModels: map[string][]fingerprint.DeviceModelConfig{

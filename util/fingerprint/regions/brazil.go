@@ -50,19 +50,9 @@ func init() {
 		},
 
 		MobileNetworks: []fingerprint.MobileNetworkConfig{
-			// Vivo: 38% (最大运营商，巴西市场份额第一)
-			{MCC: "724", MNC: "10", OperatorName: "Vivo", Weight: 0.28}, // 主要 MNC（提高权重）
-			{MCC: "724", MNC: "11", OperatorName: "Vivo", Weight: 0.07},
-			{MCC: "724", MNC: "06", OperatorName: "Vivo", Weight: 0.03},
-			// Claro: 30% (第二大运营商)
-			{MCC: "724", MNC: "05", OperatorName: "Claro", Weight: 0.22}, // 主要 MNC（提高权重）
-			{MCC: "724", MNC: "38", OperatorName: "Claro", Weight: 0.08},
-			// TIM: 22% (第三大运营商)
-			{MCC: "724", MNC: "02", OperatorName: "TIM", Weight: 0.18}, // 主要 MNC（提高权重）
-			{MCC: "724", MNC: "03", OperatorName: "TIM", Weight: 0.04},
-			// Oi: 10% (最小运营商)
-			{MCC: "724", MNC: "31", OperatorName: "Oi", Weight: 0.08}, // 主要 MNC（提高权重）
-			{MCC: "724", MNC: "30", OperatorName: "Oi", Weight: 0.02},
+			// 巴西仅有1个MCC：724
+			// MCC 724: 巴西所有运营商 (TIM, Vivo, Claro, Oi等)
+			{MCC: "724", Weight: 1.0}, // 100% - 巴西统一使用MCC 724
 		},
 
 		DeviceModels: map[string][]fingerprint.DeviceModelConfig{

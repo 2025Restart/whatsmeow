@@ -49,10 +49,8 @@ type PlatformDistribution struct {
 
 // MobileNetworkConfig 移动网络配置
 type MobileNetworkConfig struct {
-	MCC          string
-	MNC          string
-	OperatorName string
-	Weight       float64 // 运营商市场份额（总和应为 1.0）
+	MCC    string  // 移动国家代码
+	Weight float64 // 权重（用于随机选择，总和应为 1.0）
 }
 
 // DeviceModelConfig 设备型号配置
