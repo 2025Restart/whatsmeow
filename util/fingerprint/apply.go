@@ -235,10 +235,13 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 			}
 
 			// 设置 PlatformType（用于显示浏览器图标）
-			if fp.PlatformType != nil {
+			// 优先级：WebSubPlatform 映射 > 数据库指纹 > OS 推断
+			if payload.WebInfo != nil && payload.WebInfo.WebSubPlatform != nil {
+				deviceProps.PlatformType = MapWebSubPlatformToPlatformType(payload.WebInfo.GetWebSubPlatform()).Enum()
+			} else if fp.PlatformType != nil {
 				deviceProps.PlatformType = fp.PlatformType
 			} else {
-				// 如果 PlatformType 未设置，根据 Os 内容推断
+				// 根据 Os 内容推断 PlatformType
 				deviceProps.PlatformType = inferPlatformTypeFromOs(fp.DevicePropsOs)
 			}
 
@@ -308,6 +311,28 @@ func ApplyFingerprint(payload *waWa6.ClientPayload, fp *store.DeviceFingerprint,
 		}
 	}
 
+}
+
+// MapWebSubPlatformToPlatformType 将 WebSubPlatform 映射到 PlatformType
+// 确保 WebInfo.WebSubPlatform 与 DeviceProps.PlatformType 逻辑一致
+func MapWebSubPlatformToPlatformType(webSubPlatform waWa6.ClientPayload_WebInfo_WebSubPlatform) waCompanionReg.DeviceProps_PlatformType {
+	switch webSubPlatform {
+	case waWa6.ClientPayload_WebInfo_WEB_BROWSER:
+		// WEB_BROWSER → CHROME（浏览器）
+		return waCompanionReg.DeviceProps_CHROME
+	case waWa6.ClientPayload_WebInfo_WIN_STORE, waWa6.ClientPayload_WebInfo_WIN32, waWa6.ClientPayload_WebInfo_WIN_HYBRID:
+		// Windows 桌面应用 → DESKTOP
+		return waCompanionReg.DeviceProps_DESKTOP
+	case waWa6.ClientPayload_WebInfo_DARWIN:
+		// macOS 应用 → CATALINA（Safari）
+		return waCompanionReg.DeviceProps_CATALINA
+	case waWa6.ClientPayload_WebInfo_APP_STORE:
+		// 应用商店版本 → DESKTOP
+		return waCompanionReg.DeviceProps_DESKTOP
+	default:
+		// 默认使用 CHROME
+		return waCompanionReg.DeviceProps_CHROME
+	}
 }
 
 // inferPlatformTypeFromOs 根据 DeviceProps.Os 的内容推断 PlatformType

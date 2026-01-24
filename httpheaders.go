@@ -20,29 +20,8 @@ import (
 	"go.mau.fi/whatsmeow/proto/waWa6"
 	"go.mau.fi/whatsmeow/socket"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/util/fingerprint"
 )
-
-// mapWebSubPlatformToPlatformType 将 WebSubPlatform 映射到 PlatformType
-// 确保 WebInfo.WebSubPlatform 与 DeviceProps.PlatformType 逻辑一致
-func mapWebSubPlatformToPlatformType(webSubPlatform waWa6.ClientPayload_WebInfo_WebSubPlatform) waCompanionReg.DeviceProps_PlatformType {
-	switch webSubPlatform {
-	case waWa6.ClientPayload_WebInfo_WEB_BROWSER:
-		// WEB_BROWSER → CHROME（浏览器）
-		return waCompanionReg.DeviceProps_CHROME
-	case waWa6.ClientPayload_WebInfo_WIN_STORE, waWa6.ClientPayload_WebInfo_WIN32, waWa6.ClientPayload_WebInfo_WIN_HYBRID:
-		// Windows 桌面应用 → DESKTOP
-		return waCompanionReg.DeviceProps_DESKTOP
-	case waWa6.ClientPayload_WebInfo_DARWIN:
-		// macOS 应用 → CATALINA（Safari）
-		return waCompanionReg.DeviceProps_CATALINA
-	case waWa6.ClientPayload_WebInfo_APP_STORE:
-		// 应用商店版本 → DESKTOP
-		return waCompanionReg.DeviceProps_DESKTOP
-	default:
-		// 默认使用 CHROME
-		return waCompanionReg.DeviceProps_CHROME
-	}
-}
 
 // generateUserAgent 根据 Payload 信息生成浏览器 User-Agent 字符串
 // 优先从 ClientPayload 中提取，确保与握手包 100% 一致
@@ -91,7 +70,7 @@ func (cli *Client) generateUserAgent() string {
 	// 从 WebSubPlatform 映射到 PlatformType（确保一致性）
 	platformType := waCompanionReg.DeviceProps_CHROME
 	if payload.WebInfo != nil && payload.WebInfo.WebSubPlatform != nil {
-		platformType = mapWebSubPlatformToPlatformType(payload.WebInfo.GetWebSubPlatform())
+		platformType = fingerprint.MapWebSubPlatformToPlatformType(payload.WebInfo.GetWebSubPlatform())
 	} else if payload.DevicePairingData != nil && len(payload.DevicePairingData.DeviceProps) > 0 {
 		// 如果 WebInfo 不存在，尝试从 DeviceProps 获取 PlatformType
 		var deviceProps waCompanionReg.DeviceProps
