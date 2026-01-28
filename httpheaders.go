@@ -91,6 +91,35 @@ type fingerprintInfo struct {
 	LocaleCountry  string
 }
 
+// buildFingerprintIDFromUA 根据指纹信息和 UserAgent 构造稳定的指纹ID（仅用于日志聚合）
+// 同一组指纹和 UA 字段会生成相同的 ID，便于在日志中聚合分析
+func buildFingerprintIDFromUA(fp fingerprintInfo, ua *waWa6.ClientPayload_UserAgent) string {
+	if ua == nil {
+		return "fp_nil"
+	}
+
+	parts := []string{
+		fp.DevicePropsOs,
+		fp.OsVersion,
+		fp.LocaleLanguage,
+		fp.LocaleCountry,
+		ua.GetManufacturer(),
+		ua.GetDevice(),
+		ua.GetDeviceModelType(),
+		ua.GetOsVersion(),
+		ua.GetMcc(),
+		ua.GetMnc(),
+		ua.GetPlatform().String(),
+		ua.GetDeviceType().String(),
+	}
+
+	key := strings.Join(parts, "|")
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(key))
+
+	return fmt.Sprintf("fp_%016x", h.Sum64())
+}
+
 // getFingerprintInfo 获取指纹信息（从数据库或临时指纹）
 func (cli *Client) getFingerprintInfo() fingerprintInfo {
 	var fp fingerprintInfo
@@ -127,9 +156,10 @@ func (cli *Client) getFingerprintInfo() fingerprintInfo {
 	return fp
 }
 
-// getChromeVersion 基于设备ID生成确定性的Chrome版本号（131.0.0.0 - 131.0.2.0）
-// 确保同一设备每次生成的版本号一致，不同设备有差异
-// 参考：Chrome 131+ 版本分布（2024-2025）
+// getChromeVersion 基于设备ID生成确定性的Chrome版本号
+// - 确保同一设备每次生成的版本号一致
+// - 不同设备之间有差异
+// - 版本范围扩展到 129–132 主版本，更贴近真实分布，避免所有指纹集中在单一版本
 func getChromeVersion(seed, country string) string {
 	if seed == "" {
 		return "131.0.0.0"
@@ -137,10 +167,12 @@ func getChromeVersion(seed, country string) string {
 	h := fnv.New32a()
 	h.Write([]byte(seed + country))
 	r := rand.New(rand.NewSource(int64(h.Sum32())))
-	// 随机微调：131.0.0.0, 131.0.1.0, 131.0.2.0
-	// 注意：地区差异缺乏明确依据，仅保留设备ID差异
-	patch := r.Intn(3) // 0, 1, 2
-	return fmt.Sprintf("131.0.%d.0", patch)
+	// 主版本：129–132（含），覆盖近期稳定版本区间
+	majorBase := 129
+	major := majorBase + r.Intn(4) // 129,130,131,132
+	// patch：0–5 之间，提供适度离散度
+	patch := r.Intn(6)
+	return fmt.Sprintf("%d.0.%d.0", major, patch)
 }
 
 // generateBrowserUserAgent 根据浏览器类型和操作系统生成 User-Agent
@@ -480,15 +512,31 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 			osName = "Windows"
 		}
 
-		// 确保 Client Hints 格式正确（避免 atn/cln 封控）
-		// 使用与 UA 一致的 Chrome 版本号（考虑地区）
+		// 推断浏览器家族（仅用于 Client Hints 品牌，不改变 UA 本身）
+		browserFamily := "chrome" // 默认：Chrome 家族
+		fp := cli.getFingerprintInfo()
+		switch fp.PlatformType {
+		case waCompanionReg.DeviceProps_EDGE:
+			browserFamily = "edge"
+		case waCompanionReg.DeviceProps_OPERA:
+			browserFamily = "opera"
+		// Firefox / Safari 等非 Chromium 浏览器目前在真实环境中一般不发送 UA Client Hints
+		// 为保持真实性，这里不强行伪造 Sec-CH-UA，只保留 UA 本身
+		case waCompanionReg.DeviceProps_FIREFOX,
+			waCompanionReg.DeviceProps_SAFARI,
+			waCompanionReg.DeviceProps_CATALINA:
+			browserFamily = "non-chromium"
+		default:
+			// 其他情况保持默认 chrome
+		}
+
+		// 确保 Client Hints 中的版本号与 UA 一致（对 Chromium 家族生效）
 		seed := ""
 		country := ""
 		if cli.Store != nil {
 			if cli.Store.ID != nil {
 				seed = cli.Store.ID.String()
 			}
-			fp := cli.getFingerprintInfo()
 			country = fp.LocaleCountry
 			// 优先使用 Payload 中的国家信息
 			if payload.UserAgent.LocaleCountryIso31661Alpha2 != nil {
@@ -496,28 +544,71 @@ func (cli *Client) setWebSocketHeaders(headers http.Header) {
 			}
 		}
 		chromeVersion := getChromeVersion(seed, country)
-		// 提取主版本号（131.0.1.0 -> 131）
+		// 提取主版本号（例如 131.0.1.0 -> 131）
 		versionParts := strings.Split(chromeVersion, ".")
 		mainVersion := "131"
 		if len(versionParts) > 0 {
 			mainVersion = versionParts[0]
 		}
 
-		// 规范 Client Hints 格式 (解决 cco/atn/cln 封控)
-		// 1. Sec-Ch-Ua-Platform 必须带双引号
-		headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
-		// 2. Sec-Ch-Ua-Mobile 必须是 ?0
-		headers.Set("Sec-Ch-Ua-Mobile", "?0")
-		// 3. Sec-Ch-Ua 必须符合规范，包含 Chromium 和 Google Chrome 且版本一致
-		// 注意：Not_A Brand 版本号通常是 24 或 99
-		headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", mainVersion, mainVersion))
-		// 4. 补充 Full Version List (可选但建议)
-		headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not_A Brand\";v=\"24\"", chromeVersion, chromeVersion))
+		// 仅对 Chromium 家族浏览器注入 Sec-CH-UA，保持与真实浏览器行为一致
+		switch browserFamily {
+		case "chrome":
+			// Google Chrome
+			headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
+			headers.Set("Sec-Ch-Ua-Mobile", "?0")
+			headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", mainVersion, mainVersion))
+			headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", chromeVersion, chromeVersion))
+		case "edge":
+			// Microsoft Edge（Chromium 内核）
+			headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
+			headers.Set("Sec-Ch-Ua-Mobile", "?0")
+			headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Microsoft Edge\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", mainVersion, mainVersion))
+			headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Microsoft Edge\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", chromeVersion, chromeVersion))
+		case "opera":
+			// Opera（Chromium 内核），品牌名称基于通用 UA-CH 规范
+			headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
+			headers.Set("Sec-Ch-Ua-Mobile", "?0")
+			headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Opera\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", mainVersion, mainVersion))
+			headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Opera\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", chromeVersion, chromeVersion))
+		case "non-chromium":
+			// Firefox / Safari 等非 Chromium 浏览器：真实行为一般不发送 UA Client Hints
+			// 为保持真实性，这里不设置 Sec-CH-UA 相关头，仅依赖 User-Agent 本身
+		default:
+			// 兜底：按 Chrome 处理，防止缺少 Client Hints 导致服务器异常
+			headers.Set("Sec-Ch-Ua-Platform", fmt.Sprintf("\"%s\"", osName))
+			headers.Set("Sec-Ch-Ua-Mobile", "?0")
+			headers.Set("Sec-Ch-Ua", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", mainVersion, mainVersion))
+			headers.Set("Sec-Ch-Ua-Full-Version-List", fmt.Sprintf("\"Google Chrome\";v=\"%s\", \"Chromium\";v=\"%s\", \"Not A(Brand\";v=\"24\"", chromeVersion, chromeVersion))
+		}
 
 		// 记录 Client Hints 设置（用于验证）
 		if cli.Log != nil {
-			cli.Log.Debugf("[Fingerprint] Set Client Hints: Platform=%s, Mobile=?0, UA=Chrome/%s, MCC=%s, MNC=%s",
-				osName, mainVersion, payload.UserAgent.GetMcc(), payload.UserAgent.GetMnc())
+			cli.Log.Debugf("[Fingerprint] Set Client Hints: Platform=%s, Mobile=?0, UA-Family=%s/%s, MCC=%s, MNC=%s",
+				osName, browserFamily, mainVersion, payload.UserAgent.GetMcc(), payload.UserAgent.GetMnc())
+
+			// 记录更详细的指纹与 Client Hints 关系，用于后续日志聚合与问题排查
+			fpInfo := cli.getFingerprintInfo()
+			fingerprintID := buildFingerprintIDFromUA(fpInfo, payload.UserAgent)
+			cli.Log.Debugf(
+				"[Fingerprint] Client Hints detail: fingerprint_id=%s; FP={PlatformType=%v, DevicePropsOs=%s, OsVersion=%s, Lang=%s, Country=%s}; UA={Platform=%v, Device=%s, Manufacturer=%s, OsVersion=%s, MCC=%s, MNC=%s}; CH={UaPlatform=%s, UaMobile=%s, Ua=%s, UaFull=%s}",
+				fingerprintID,
+				fpInfo.PlatformType,
+				fpInfo.DevicePropsOs,
+				fpInfo.OsVersion,
+				fpInfo.LocaleLanguage,
+				fpInfo.LocaleCountry,
+				payload.UserAgent.GetPlatform(),
+				payload.UserAgent.GetDevice(),
+				payload.UserAgent.GetManufacturer(),
+				payload.UserAgent.GetOsVersion(),
+				payload.UserAgent.GetMcc(),
+				payload.UserAgent.GetMnc(),
+				headers.Get("Sec-Ch-Ua-Platform"),
+				headers.Get("Sec-Ch-Ua-Mobile"),
+				headers.Get("Sec-Ch-Ua"),
+				headers.Get("Sec-Ch-Ua-Full-Version-List"),
+			)
 
 			// 验证 WEB 平台特征一致性（避免 vll/lla/atn/cln 封控）
 			if payload.UserAgent.GetPlatform() == waWa6.ClientPayload_UserAgent_WEB {
