@@ -424,19 +424,39 @@ type reachoutTimelockPayload struct {
 	TimeEnds        interface{} `json:"time_enforcement_ends"` // Unix timestamp in seconds (may be string or number)
 }
 
+type groupOnPropChangePayload struct {
+	ID         string                      `json:"id"` // group JID string (e.g. 120...@g.us)
+	Properties groupOnPropChangeProperties `json:"properties"`
+	UpdateTime interface{}                 `json:"update_time"` // usually unix ms (may be string or number)
+	UpdatedBy  groupOnPropChangeUpdatedBy  `json:"updated_by"`
+}
+
+type groupOnPropChangeProperties struct {
+	MemberLinkMode string `json:"member_link_mode"` // ALL_MEMBER_LINK / ADMIN_LINK
+}
+
+type groupOnPropChangeUpdatedBy struct {
+	ID         string `json:"id"`          // actor JID string (often LID, e.g. ...@lid)
+	PN         string `json:"pn"`          // actor phone number JID string (e.g. ...@s.whatsapp.net)
+	NotifyName string `json:"notify_name"` // optional
+}
+
 // mexEventData represents all possible mex event types in a unified structure
 type mexEventData struct {
 	// Newsletter events
 	NewsletterJoin       *events.NewsletterJoin       `json:"xwa2_notify_newsletter_on_join"`
-	NewsletterLeave      *events.NewsletterLeave       `json:"xwa2_notify_newsletter_on_leave"`
+	NewsletterLeave      *events.NewsletterLeave      `json:"xwa2_notify_newsletter_on_leave"`
 	NewsletterMuteChange *events.NewsletterMuteChange `json:"xwa2_notify_newsletter_on_mute_change"`
 	// Reachout timelock event
 	ReachoutTimelock *reachoutTimelockPayload `json:"xwa2_notify_account_reachout_timelock"`
+	// Group property update events (e.g. member_link_mode)
+	GroupOnPropChange *groupOnPropChangePayload `json:"xwa2_notify_group_on_prop_change"`
 }
 
 func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Node) {
 	ag := node.AttrGetter()
 	timestamp := ag.UnixTime("t")
+	notify := ag.OptionalString("notify")
 	for _, child := range node.GetChildren() {
 		if child.Tag != "update" {
 			continue
@@ -463,9 +483,80 @@ func (cli *Client) handleMexNotification(ctx context.Context, node *waBinary.Nod
 				cli.dispatchEvent(&events.ReachoutTimelock{
 					EnforcementType: enforcementType,
 					IsActive:        timelock.IsActive,
-					TimeEnds:         timeEnds,
-					Timestamp:        timestamp,
+					TimeEnds:        timeEnds,
+					Timestamp:       timestamp,
 				})
+				continue
+			}
+			// Check for group property update events (e.g. member_link_mode)
+			if unifiedData.Data.GroupOnPropChange != nil {
+				payload := unifiedData.Data.GroupOnPropChange
+				mode := payload.Properties.MemberLinkMode
+				if mode == "" || payload.ID == "" {
+					// Parsed successfully but missing required fields, ignore safely
+					continue
+				}
+				if mode != string(types.GroupMemberLinkModeAllMemberLink) && mode != string(types.GroupMemberLinkModeAdminLink) {
+					// Unknown mode, ignore safely
+					continue
+				}
+
+				groupJID, err := types.ParseJID(payload.ID)
+				if err != nil {
+					cli.Log.Warnf("Failed to parse group JID in mex group prop change (%q): %v", payload.ID, err)
+					continue
+				}
+
+				var actorJIDPtr *types.JID
+				if payload.UpdatedBy.ID != "" {
+					actorJID, err := types.ParseJID(payload.UpdatedBy.ID)
+					if err != nil {
+						cli.Log.Warnf("Failed to parse actor JID in mex group prop change (%q): %v", payload.UpdatedBy.ID, err)
+					} else {
+						actorJIDPtr = &actorJID
+					}
+				}
+
+				var actorPNPtr *types.JID
+				if payload.UpdatedBy.PN != "" {
+					actorPN, err := types.ParseJID(payload.UpdatedBy.PN)
+					if err != nil {
+						cli.Log.Warnf("Failed to parse actor PN in mex group prop change (%q): %v", payload.UpdatedBy.PN, err)
+					} else {
+						actorPNPtr = &actorPN
+					}
+				}
+
+				evtTS := timestamp
+				if parsedTS, err := parseUnixMillisTimestamp(payload.UpdateTime); err != nil {
+					// Keep fallback timestamp; avoid dropping event due to time parsing issues
+					cli.Log.Debugf("Failed to parse update_time in mex group prop change (jid=%s, mode=%s): %v", groupJID, mode, err)
+				} else if !parsedTS.IsZero() {
+					evtTS = parsedTS
+				}
+
+				changeNode := waBinary.Node{
+					Tag: "member_link_mode",
+					Attrs: waBinary.Attrs{
+						"member_link_mode": mode,
+						"value":            mode,
+						"source":           "mex",
+					},
+					Content: []byte(mode),
+				}
+
+				memberLinkMode := types.GroupMemberLinkMode(mode)
+				evt := &events.GroupInfo{
+					JID:            groupJID,
+					Notify:         notify,
+					Sender:         actorJIDPtr,
+					SenderPN:       actorPNPtr,
+					Timestamp:      evtTS,
+					MemberLinkMode: &memberLinkMode,
+					UnknownChanges: []*waBinary.Node{&changeNode},
+				}
+				cli.Log.Debugf("Dispatching GroupInfo from mex group prop change (jid=%s, actor=%v, mode=%s, ts=%v)", groupJID, actorJIDPtr, mode, evtTS)
+				cli.dispatchEvent(evt)
 				continue
 			}
 			// Check for newsletter events
@@ -521,6 +612,39 @@ func parseTimestamp(v interface{}) (time.Time, error) {
 	default:
 		return time.Time{}, fmt.Errorf("unexpected timestamp type: %T", v)
 	}
+}
+
+// parseUnixMillisTimestamp parses a unix timestamp that may be in seconds or milliseconds (string or number).
+// If the value looks like milliseconds (>= 1e12), it will be treated as ms.
+func parseUnixMillisTimestamp(v interface{}) (time.Time, error) {
+	switch val := v.(type) {
+	case nil:
+		return time.Time{}, fmt.Errorf("nil timestamp")
+	case string:
+		unix, err := strconv.ParseInt(val, 10, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return unixToTimeMaybeMillis(unix), nil
+	case float64:
+		return unixToTimeMaybeMillis(int64(val)), nil
+	case int64:
+		return unixToTimeMaybeMillis(val), nil
+	case int:
+		return unixToTimeMaybeMillis(int64(val)), nil
+	default:
+		return time.Time{}, fmt.Errorf("unexpected timestamp type: %T", v)
+	}
+}
+
+func unixToTimeMaybeMillis(unix int64) time.Time {
+	// Heuristic: 13-digit unix timestamps are usually milliseconds.
+	if unix >= 1_000_000_000_000 {
+		sec := unix / 1000
+		nsec := (unix % 1000) * int64(time.Millisecond)
+		return time.Unix(sec, nsec)
+	}
+	return time.Unix(unix, 0)
 }
 
 // parseString safely converts interface{} to string

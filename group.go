@@ -754,7 +754,8 @@ func (cli *Client) parseGroupNode(groupNode *waBinary.Node) (*types.GroupInfo, e
 		case "incognito":
 			group.IsIncognito = true
 		case "membership_approval_mode":
-			group.IsJoinApprovalRequired = true
+			membershipApproval := cli.parseMembershipApprovalModeNode(&child)
+			group.IsJoinApprovalRequired = membershipApproval.IsJoinApprovalRequired
 		case "suspended":
 			group.Suspended = true
 		default:
@@ -784,6 +785,34 @@ func parseGroupLinkTargetNode(groupNode *waBinary.Node) (types.GroupLinkTarget, 
 			IsDefaultSubGroup: groupNode.GetChildByTag("default_sub_group").Tag == "default_sub_group",
 		},
 	}, ag.Error()
+}
+
+func (cli *Client) parseMembershipApprovalModeNode(node *waBinary.Node) *types.GroupMembershipApprovalMode {
+	groupJoinNode, ok := node.GetOptionalChildByTag("group_join")
+	if !ok {
+		cli.Log.Debugf("membership_approval_mode node without group_join child: %s", node.XMLString())
+		return &types.GroupMembershipApprovalMode{
+			IsJoinApprovalRequired: true,
+		}
+	}
+	ag := groupJoinNode.AttrGetter()
+	state := ag.OptionalString("state")
+
+	switch state {
+	case "on":
+		return &types.GroupMembershipApprovalMode{
+			IsJoinApprovalRequired: true,
+		}
+	case "off":
+		return &types.GroupMembershipApprovalMode{
+			IsJoinApprovalRequired: false,
+		}
+	default:
+		cli.Log.Debugf("membership_approval_mode group_join with unknown or missing state '%s', defaulting to join approval required", state)
+		return &types.GroupMembershipApprovalMode{
+			IsJoinApprovalRequired: true,
+		}
+	}
 }
 
 func parseParticipantList(node *waBinary.Node) (participants []types.JID, lidPairs []store.LIDMapping) {
@@ -952,9 +981,7 @@ func (cli *Client) parseGroupChange(node *waBinary.Node) (*events.GroupInfo, []s
 				return nil, nil, fmt.Errorf("failed to parse group unlink node in group change: %w", err)
 			}
 		case "membership_approval_mode":
-			evt.MembershipApprovalMode = &types.GroupMembershipApprovalMode{
-				IsJoinApprovalRequired: true,
-			}
+			evt.MembershipApprovalMode = cli.parseMembershipApprovalModeNode(&child)
 		case "suspended":
 			evt.Suspended = true
 		case "unsuspended":

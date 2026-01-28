@@ -17,6 +17,15 @@ const (
 	GroupMemberAddModeAllMember GroupMemberAddMode = "all_member_add"
 )
 
+// GroupMemberLinkMode describes who can create group invite links.
+// Values observed in mex payloads: ALL_MEMBER_LINK / ADMIN_LINK.
+type GroupMemberLinkMode string
+
+const (
+	GroupMemberLinkModeAllMemberLink GroupMemberLinkMode = "ALL_MEMBER_LINK"
+	GroupMemberLinkModeAdminLink     GroupMemberLinkMode = "ADMIN_LINK"
+)
+
 // GroupInfo contains basic information about a group chat on WhatsApp.
 type GroupInfo struct {
 	JID      JID
